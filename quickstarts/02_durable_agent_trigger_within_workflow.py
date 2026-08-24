@@ -38,7 +38,7 @@ def main() -> None:
 
     state = client.wait_for_workflow_completion(
         instance_id=instance_id,
-        timeout_in_seconds=120,
+        timeout_in_seconds=600,
         fetch_payloads=True,
     )
     print(f"Workflow status: {state.runtime_status.name}")

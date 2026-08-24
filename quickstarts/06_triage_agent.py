@@ -12,9 +12,10 @@
 #
 
 from dapr_agents import DurableAgent, tool
-from dapr_agents.agents.configs import AgentMemoryConfig
+from dapr_agents.agents.configs import AgentMemoryConfig, AgentRegistryConfig
 from dapr_agents.llm.dapr import DaprChatClient
 from dapr_agents.memory import ConversationDaprStateMemory
+from dapr_agents.storage.daprstores.stateservice import StateStoreService
 from dapr_agents import AgentRunner
 from dotenv import load_dotenv
 
@@ -42,7 +43,10 @@ def main():
         role="Customer Support Triage Assistant",
         goal="Gather customer information and prepare a triage summary.",
         instructions=[
-            "Use the tool to get customer information, then combine it with the issue description.",
+            "The task contains both a customer name and an issue description.",
+            "Call get_customer_info exactly once using the provided customer name.",
+            "Return a concise triage summary containing both the tool result and the original issue description.",
+            "Do not ask for information that is already present in the task.",
         ],
         llm=llm,
         tools=[get_customer_info],
@@ -51,6 +55,11 @@ def main():
                 store_name="agent-memory",
             )
         ),
+        registry=AgentRegistryConfig(
+            store=StateStoreService(store_name="agent-registry"),
+            team_name="triage-workflow",
+        ),
+        summarize_memory=False,
     )
     runner = AgentRunner()
     try:

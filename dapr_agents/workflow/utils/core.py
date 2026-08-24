@@ -211,7 +211,8 @@ def trigger_agent(
     wfr.start()
 
     try:
-        with wf.DaprWorkflowClient() as client:
+        client = wf.DaprWorkflowClient()
+        try:
             instance_id = client.schedule_new_workflow(workflow=trigger)
             try:
                 state = client.wait_for_workflow_completion(
@@ -228,7 +229,9 @@ def trigger_agent(
                     instance_id,
                 )
                 return None
-        return state.serialized_output if state is not None else None
+            return state.serialized_output if state is not None else None
+        finally:
+            client.close()
     finally:
         wfr.shutdown()
 

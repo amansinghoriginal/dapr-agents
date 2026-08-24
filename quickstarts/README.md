@@ -127,7 +127,7 @@ Dapr supports Anthropic, Mistral, and other LLM providers through the Conversati
 This example shows the simplest way to call an LLM using the Dapr Chat Client, which sends prompts through the Dapr Conversation API. It’s a minimal starting point before introducing agents in later examples.
 
 ```bash
-uv run dapr run --app-id llm-client --resources-path resources -- python 01_llm_client.py
+uv run --active dapr run --app-id llm-client --resources-path resources -- python 01_llm_client.py
 ```
 
 ## Expected Behavior
@@ -154,7 +154,7 @@ The agent keeps its runtime alive and waits for incoming workflow calls.
 **Terminal 1 — start the agent:**
 
 ```bash
-uv run dapr run --app-id weather-agent --resources-path resources -- python 02_durable_agent_workflow.py
+uv run --active dapr run --app-id weather-agent --resources-path resources -- python 02_durable_agent_workflow.py
 ```
 
 Then, in a second terminal, choose one of the two trigger options below depending on your use case.
@@ -168,7 +168,7 @@ Use this when you want to fire-and-wait from a plain Python script. `trigger_age
 **Terminal 2:**
 
 ```bash
-uv run dapr run --app-id workflow-trigger --dapr-http-port 3501 -- python 02_durable_agent_trigger.py
+uv run --active dapr run --app-id workflow-trigger --dapr-http-port 3501 -- python 02_durable_agent_trigger.py
 ```
 
 `trigger_agent` registers a short-lived wrapper workflow, schedules it against the WeatherAgent’s Dapr app (`app_id="weather-agent"`), blocks until it completes, and returns the serialized output — all in one call.
@@ -183,7 +183,7 @@ Use this when you are building an orchestrator workflow that calls one or more a
 **Terminal 2:**
 
 ```bash
-uv run dapr run --app-id agent-orchestrator --dapr-http-port 3501 -- python 02_durable_agent_trigger_within_workflow.py
+uv run --active dapr run --app-id agent-orchestrator --dapr-http-port 3501 -- python 02_durable_agent_trigger_within_workflow.py
 ```
 
 Inside the orchestrator, `call_agent(ctx, "WeatherAgent", input={...}, app_id="weather-agent")` resolves the workflow name and delegates to `ctx.call_child_workflow`, routing execution to the WeatherAgent’s workflow runtime in its own Dapr app.
@@ -214,7 +214,7 @@ The agent starts its workflow runtime and waits for external triggers. When trig
 This example introduces the `DurableAgent`, a workflow-native agent backed by the Dapr Workflow engine. Every step of the agent’s execution is persisted to durable storage, allowing long-running interactions to survive interruptions. The agent exposes an HTTP endpoint to start a new workflow and provides a way to query progress or retrieve the final result at any time.
 
 ```bash
-uv run dapr run --app-id durable-agent --resources-path resources -- python 03_durable_agent_http.py
+uv run --active dapr run --app-id durable-agent --resources-path resources -- python 03_durable_agent_http.py
 ```
 
 On a different terminal, trigger the agent:
@@ -247,12 +247,12 @@ The agent exposes a REST endpoint, accepts a prompt, and returns a workflow ID t
 
 **Testing durability:**
 
-This example includes a different tool, **SlowWeatherTool**, which intentionally waits five seconds before returning a result. This delay allows you to interrupt the agent mid-execution and verify that the workflow engine resumes from the same point after the agent restarts.
+This example includes a different tool, **SlowWeatherTool**, which intentionally waits 30 seconds before returning a result. This delay allows you to interrupt the agent mid-execution and verify that the workflow engine resumes from the same point after the agent restarts.
 
 To test this:
 
 1. Trigger the agent with a prompt using the POST command shown above.
-2. During the 5-second delay inside **SlowWeatherTool**, stop the agent by pressing **Ctrl+C**.
+2. During the 30-second delay inside **SlowWeatherTool**, stop the agent by pressing **Ctrl+C**.
 3. Restart the agent using the same `dapr run` command.
 4. Query the workflow using the same `WORKFLOW_ID`; you will see that it continues from the step it was on—**without starting over, without repeating the LLM call, and without requiring a new prompt**.
 5. Once the workflow finishes, the GET request will show the completed result.
@@ -274,7 +274,7 @@ This example takes the same durable agent behavior from the previous example, bu
 The agent code remains unchanged; only the AgentRunner configuration switches from REST to pub/sub.
 
 ```bash
-uv run dapr run --app-id durable-agent-subscriber --resources-path resources --dapr-http-port 3500 -- python 04_durable_agent_pubsub.py
+uv run --active dapr run --app-id durable-agent-subscriber --resources-path resources --dapr-http-port 3500 -- python 04_durable_agent_pubsub.py
 ```
 
 On a different terminal, publish a message to the subscribed topic:
@@ -304,7 +304,7 @@ Try publishing multiple messages to the topic and observe the agent process each
 This example does not use an agent. Instead, it demonstrates how to create a Dapr workflow that performs LLM calls in a deterministic, durable sequence.
 
 ```bash
-uv run dapr run --app-id workflow-llms --resources-path resources -- python 05_workflow_llm.py
+uv run --active dapr run --app-id workflow-llms --resources-path resources -- python 05_workflow_llm.py
 ```
 
 ## Expected Behavior
@@ -328,9 +328,7 @@ The workflow generates a short outline for the given topic using an LLM, then us
 This example shows how a workflow can invoke entire agents as child workflows, allowing you to orchestrate multi-step agent reasoning in a durable and deterministic way. Unlike previous examples where activities called LLMs directly, this workflow delegates each step to an agent with tools and memory, while the workflow engine provides durability and reliable progression.
 
 ```bash
-# Patch the multi-app YAML to use the resolved resources path, then run
-sed "s|resourcesPath: ./resources|resourcesPath: $DAPR_RESOURCES|g" 06_workflow_agents.yaml > /tmp/06_resolved.yaml
-uv run dapr run -f /tmp/06_resolved.yaml
+uv run --active dapr run -f 06_workflow_agents.yaml
 ```
 
 ## Expected Behavior
@@ -370,7 +368,7 @@ docker run -d -p 9411:9411 openzipkin/zipkin
 Now run the durable agent with tracing enabled and prompting included:
 
 ```
-uv run dapr run --app-id durable-agent-trace --resources-path resources -- python 07_durable_agent_tracing.py
+uv run --active dapr run --app-id durable-agent-trace --resources-path resources -- python 07_durable_agent_tracing.py
 ```
 
 ## Expected Behavior

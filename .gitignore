@@ -187,6 +187,7 @@ cython_debug/
 quickstarts/**/*_state.json
 chroma_db/
 db/
+.tutorial-evaluation/
 
 # Requirements files since we use pyproject.toml instead
 dev-requirements.txt

@@ -1,0 +1,43 @@
+{
+  "name": "Dapr Agents Tutorial Evaluation",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+  "runArgs": [
+    "--privileged",
+    "--init"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "27",
+      "moby": "false"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
+    "ghcr.io/dapr/cli/dapr-cli:0": {}
+  },
+  "containerEnv": {
+    "DAPR_AGENTS_TUTORIAL_EVALUATION": "true",
+    "DAPR_RUNTIME_VERSION": "1.18.0",
+    "OLLAMA_ENDPOINT": "http://localhost:11434/v1",
+    "OLLAMA_HOST": "127.0.0.1:11434",
+    "OLLAMA_MODEL": "qwen3:0.6b",
+    "OLLAMA_TOOL_MODEL": "qwen2.5:3b",
+    "OLLAMA_NUM_PARALLEL": "1",
+    "OPENAI_API_KEY": "ollama",
+    "OPENAI_BASE_URL": "http://localhost:11434/v1",
+    "PYTHONUNBUFFERED": "1"
+  },
+  "remoteEnv": {
+    "COPILOT_GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.tutorial-evaluation/cache/ollama,target=/home/vscode/.ollama,type=bind"
+  ],
+  "postCreateCommand": "bash .devcontainer/tutorial-evaluation/post-create.sh"
+}

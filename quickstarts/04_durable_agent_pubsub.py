@@ -61,7 +61,12 @@ async def main() -> None:
 
     runner = AgentRunner()
     try:
-        runner.subscribe(weather_agent)
+        runner.subscribe(
+            weather_agent,
+            await_result=True,
+            await_timeout=300,
+            log_outcome=True,
+        )
         await wait_for_shutdown()
     finally:
         runner.shutdown()

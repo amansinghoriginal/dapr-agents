@@ -46,8 +46,11 @@ Create a `.env` file in the project root with the following content.
 DAPR_LLM_COMPONENT_DEFAULT=echo
 ```
 
-The OpenAI API key is not needed for this example.
-Create a `echo.yaml` file in the component folder
+The OpenAI API key is not needed for this example. An Echo-only component
+directory is provided at `resources/echo-only` so Dapr does not initialize
+components for the other examples.
+
+The `resources/echo-only/echo.yaml` file contains:
 
 ```yaml
 apiVersion: dapr.io/v1alpha1
@@ -61,7 +64,7 @@ spec:
 
 Run the basic text completion example:
 ```bash
-uv run dapr run --app-id dapr-llm --resources-path ./resources -- python text_completion.py
+uv run dapr run --app-id dapr-llm --resources-path ./resources/echo-only -- python text_completion.py
 ```
 
 The script uses the `DaprChatClient` which connects to Dapr's `echo` LLM component:

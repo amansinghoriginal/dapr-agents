@@ -145,8 +145,6 @@ def _make_wf_mocks():
     mock_state.serialized_output = '{"answer": "Sunny"}'
 
     mock_client = MagicMock()
-    mock_client.__enter__ = MagicMock(return_value=mock_client)
-    mock_client.__exit__ = MagicMock(return_value=False)
     mock_client.schedule_new_workflow.return_value = "instance-123"
     mock_client.wait_for_workflow_completion.return_value = mock_state
 
@@ -208,6 +206,7 @@ def test_trigger_agent_shuts_down_on_success():
         trigger_agent("WeatherAgent", input={}, app_id="weather-agent")
 
     mock_wfr.shutdown.assert_called_once()
+    mock_client.close.assert_called_once()
 
 
 def test_trigger_agent_shuts_down_on_exception():
@@ -223,6 +222,7 @@ def test_trigger_agent_shuts_down_on_exception():
 
     # shutdown must still be called even when an exception is raised
     mock_wfr.shutdown.assert_called_once()
+    mock_client.close.assert_called_once()
 
 
 def test_trigger_agent_timeout_logs_warning_and_returns_none():
@@ -241,6 +241,7 @@ def test_trigger_agent_timeout_logs_warning_and_returns_none():
     assert result is None
     mock_logger.warning.assert_called_once()
     mock_wfr.shutdown.assert_called_once()
+    mock_client.close.assert_called_once()
 
 
 def test_trigger_agent_returns_serialized_output():

@@ -19,6 +19,7 @@ def main() -> None:
         "WeatherAgent",
         input={"task": "What is the weather in London?"},
         app_id="weather-agent",
+        timeout_in_seconds=600,
     )
     print(f"Result: {result}")
 

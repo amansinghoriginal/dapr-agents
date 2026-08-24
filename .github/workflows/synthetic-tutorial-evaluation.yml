@@ -1,0 +1,122 @@
+#
+# Copyright 2026 The Dapr Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Synthetic Tutorial Evaluation
+
+# This workflow runs privileged Docker-in-Docker. Keep its triggers restricted
+# to trusted branches; the ephemeral Actions runner is the security boundary.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/synthetic-tutorial-validation
+    paths:
+      - ".devcontainer/tutorial-evaluation/**"
+      - ".github/prompts/tutorial-evaluation.md"
+      - ".github/workflows/synthetic-tutorial-evaluation.yml"
+      - "examples/01-llm-call-dapr/**"
+      - "quickstarts/**"
+      - "scripts/tutorial-evaluation/**"
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    name: evaluate (${{ matrix.tutorial }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        tutorial:
+          - echo
+          - llm-client
+          - durable-workflow
+          - getting-started
+          - pubsub-agent
+          - llm-workflow
+          - agent-workflow
+          - tracing
+          - hot-reload
+
+    steps:
+      - name: Checkout Dapr Agents fork
+        uses: actions/checkout@v6
+
+      - name: Checkout Dapr Docs fork
+        if: matrix.tutorial == 'getting-started'
+        uses: actions/checkout@v6
+        with:
+          repository: amansinghoriginal/docs
+          ref: 9c389992d00eadf7a4e38877ab0116235c909c9f
+          path: dapr-docs
+          sparse-checkout: |
+            daprdocs/content/en/developing-ai/dapr-agents
+
+      - name: Restore Ollama model cache
+        uses: actions/cache@v5
+        with:
+          path: .tutorial-evaluation/cache/ollama
+          key: ollama-qwen3-0.6b-qwen2.5-3b-${{ runner.os }}
+
+      - name: Prepare tutorial case
+        run: |
+          bash scripts/tutorial-evaluation/prepare-case.sh \
+            "${{ matrix.tutorial }}" \
+            "$GITHUB_WORKSPACE/dapr-docs"
+
+      - name: Verify Copilot credential
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "::error::COPILOT_PAT_TOKEN is not configured"
+            exit 1
+          fi
+
+      - name: Run synthetic user in Dev Container
+        id: evaluation
+        continue-on-error: true
+        uses: devcontainers/ci@v0.3
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT_TOKEN }}
+        with:
+          configFile: .devcontainer/tutorial-evaluation/devcontainer.json
+          push: never
+          runCmd: |
+            bash scripts/tutorial-evaluation/run-evaluation.sh \
+              "${{ matrix.tutorial }}"
+
+      - name: Upload evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: synthetic-tutorial-${{ matrix.tutorial }}-${{ github.run_id }}
+          path: .tutorial-evaluation/results/${{ matrix.tutorial }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Check evaluation status
+        if: always()
+        env:
+          EVALUATION_OUTCOME: ${{ steps.evaluation.outcome }}
+        run: |
+          bash scripts/tutorial-evaluation/validate-report.sh \
+            "${{ matrix.tutorial }}" \
+            ".tutorial-evaluation/results/${{ matrix.tutorial }}"
+
+          if [ "$EVALUATION_OUTCOME" != "success" ]; then
+            echo "::error::Dev Container evaluation step failed"
+            exit 1
+          fi

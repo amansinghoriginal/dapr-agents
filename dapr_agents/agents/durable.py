@@ -285,6 +285,7 @@ class DurableAgent(AgentBase):
         registry: Optional[AgentRegistryConfig] = None,
         # Memory
         memory: Optional[AgentMemoryConfig] = None,
+        summarize_memory: bool = True,
         llm: Optional[ChatClientBase] = None,
         executor: Optional[AgentExecutorBase] = None,
         tools: Optional[Iterable[Any]] = None,
@@ -321,6 +322,9 @@ class DurableAgent(AgentBase):
             execution: Execution dials for the agent run.
 
             memory: Enable long-term conversation memory storage; defaults to false.
+            summarize_memory: Whether to summarize the conversation after each
+                completed workflow. Defaults to true. Disable this for one-shot
+                agents that do not need a persisted conversation summary.
             llm: Chat client; defaults to `get_default_llm()`. Mutually
                 exclusive with ``executor``.
             executor: Stateful agent runtime that is mutually exclusive with ``llm``.
@@ -405,6 +409,7 @@ class DurableAgent(AgentBase):
         self._runtime_owned = runtime is None
         self._registered = False
         self._started = False
+        self.summarize_memory = summarize_memory
         self._hooks: Optional[Hooks] = hooks
         # Activation callbacks registered by extensions via add_activation().
         # The AgentRunner fires each one exactly once when this agent is first
@@ -1147,7 +1152,7 @@ class DurableAgent(AgentBase):
                 retry_policy=self._retry_policy,
             )
 
-        if self.memory is not None:
+        if self.memory is not None and self.summarize_memory:
             yield ctx.call_activity(
                 self._activity_name(self.summarize),
                 input={},

@@ -12,9 +12,10 @@
 #
 
 from dapr_agents import DurableAgent
-from dapr_agents.agents.configs import AgentMemoryConfig
+from dapr_agents.agents.configs import AgentMemoryConfig, AgentRegistryConfig
 from dapr_agents.llm.dapr import DaprChatClient
 from dapr_agents.memory import ConversationDaprStateMemory
+from dapr_agents.storage.daprstores.stateservice import StateStoreService
 from dapr_agents import AgentRunner
 from dotenv import load_dotenv
 
@@ -28,7 +29,9 @@ def main():
         role="Technical Support Specialist",
         goal="Provide recommendations based on customer context and issue.",
         instructions=[
-            "Provide a clear, actionable recommendation to resolve the issue.",
+            "Treat the supplied original request and triage summary as complete context.",
+            "Provide a clear, actionable recommendation to resolve the stated issue.",
+            "Do not ask the user to repeat information already present in the task.",
         ],
         llm=llm,
         memory=AgentMemoryConfig(
@@ -36,6 +39,11 @@ def main():
                 store_name="agent-memory",
             )
         ),
+        registry=AgentRegistryConfig(
+            store=StateStoreService(store_name="agent-registry"),
+            team_name="expert-workflow",
+        ),
+        summarize_memory=False,
     )
     runner = AgentRunner()
     try:

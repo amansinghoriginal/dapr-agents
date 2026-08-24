@@ -41,6 +41,8 @@ async def main() -> None:
                 store_name="agent-memory",
             )
         ),
+        # Keep history without adding a post-response LLM summary to this one-shot call.
+        summarize_memory=False,
         # This is where the execution state is stored.
         state=AgentStateConfig(
             store=StateStoreService(store_name="agent-workflow"),

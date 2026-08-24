@@ -36,7 +36,13 @@ def support_workflow(ctx: wf.DaprWorkflowContext, request: dict) -> str:
     recommendation = yield call_agent(
         ctx,
         "expert_agent",
-        input={"task": triage_result.get("content", "")},
+        input={
+            "task": (
+                f"Original support request:\n{request}\n\n"
+                f"Triage summary:\n{triage_result.get('content', '')}\n\n"
+                "Provide an actionable recommendation for the stated issue."
+            )
+        },
         app_id="expert-agent",
     )
     if recommendation:
@@ -61,7 +67,7 @@ if __name__ == "__main__":
     print(f"Workflow started: {instance_id}", flush=True)
 
     try:
-        state = client.wait_for_workflow_completion(instance_id, timeout_in_seconds=120)
+        state = client.wait_for_workflow_completion(instance_id, timeout_in_seconds=600)
     except TimeoutError:
         print(f"Workflow {instance_id} timed out waiting for completion.")
         state = None

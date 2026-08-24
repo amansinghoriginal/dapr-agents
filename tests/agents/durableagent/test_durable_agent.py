@@ -209,6 +209,19 @@ class TestDurableAgent:
             execution=AgentExecutionConfig(max_iterations=5),
         )
 
+    def test_summarize_memory_defaults_to_enabled(self, basic_durable_agent):
+        assert basic_durable_agent.summarize_memory is True
+
+    def test_summarize_memory_can_be_disabled(self, mock_llm):
+        agent = DurableAgent(
+            name="NoSummaryAgent",
+            role="One-shot assistant",
+            llm=mock_llm,
+            summarize_memory=False,
+        )
+
+        assert agent.summarize_memory is False
+
     @pytest.fixture
     def durable_agent_with_tools(self, mock_llm, mock_tool):
         """Create a durable agent with tools for testing."""
@@ -1326,10 +1339,12 @@ class TestDurableAgent:
                 retry_policy=WorkflowRetryPolicy(max_attempts=0),
             )
 
+    @pytest.mark.parametrize("summarize_memory", [True, False])
     def test_agent_workflow_applies_retry_policy(
-        self, basic_durable_agent, mock_workflow_context
+        self, basic_durable_agent, mock_workflow_context, summarize_memory
     ):
         """Test that agent_workflow applies retry policy to activity calls."""
+        basic_durable_agent.summarize_memory = summarize_memory
         message = {
             "task": "Test task with retries",
             "workflow_instance_id": "parent-instance-123",
@@ -1439,6 +1454,7 @@ class TestDurableAgent:
         assert "finalize_workflow" in activity_names, (
             f"Missing finalize_workflow in {activity_names}"
         )
+        assert ("summarize" in activity_names) is summarize_memory
 
     def test_agent_workflow_max_iterations_sets_custom_status(
         self, basic_durable_agent, mock_workflow_context, mock_tool
