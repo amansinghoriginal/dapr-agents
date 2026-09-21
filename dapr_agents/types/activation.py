@@ -16,7 +16,7 @@
 An activation hook lets an extension attach itself to a :class:`DurableAgent`
 and wake up exactly once when that agent is hosted by an ``AgentRunner`` — no
 matter which host entry point is used (``serve()``, ``subscribe()``,
-``register_routes()``, ``workflow()`` or ``run()``). It is the supported seam
+``register_routes()``, ``workflow()``, ``run()`` or ``run_stream()``). It is the supported seam
 for building trigger extensions (e.g. a change-data-capture source) without
 modifying agent code.
 
@@ -47,6 +47,10 @@ class ActivationContext:
     Treat every field as read-only. The runner builds one ``ActivationContext``
     per agent the first time the agent is attached, and passes it to each
     callback registered via :meth:`DurableAgent.add_activation`.
+
+    Callbacks registered with ``before_start=True`` complete before the workflow
+    worker starts. Their Dapr clients are usable, but they must not wait for
+    workflow execution. The default callbacks retain their post-start behavior.
 
     Attributes:
         agent: The agent being hosted.

@@ -14,10 +14,12 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .activations import register_drasi_trigger
+from .subscriptions import enable_drasi_subscriptions
 from .types import DrasiChangeEvent, DrasiOperation
 
 __all__ = [
     "register_drasi_trigger",
+    "enable_drasi_subscriptions",
     "DrasiChangeEvent",
     "DrasiOperation",
 ]

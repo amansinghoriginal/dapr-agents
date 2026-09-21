@@ -2324,11 +2324,12 @@ def test_public_exports():
 
     assert set(drasi.__all__) == {
         "register_drasi_trigger",
+        "enable_drasi_subscriptions",
         "DrasiChangeEvent",
         "DrasiOperation",
     }
     assert not hasattr(drasi, "drasi_trigger")
-    assert not hasattr(drasi, "enable_drasi_subscriptions")
+    assert callable(drasi.enable_drasi_subscriptions)
 
 
 def test_router_contract_dependency():

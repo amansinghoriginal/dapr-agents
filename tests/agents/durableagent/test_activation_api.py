@@ -28,6 +28,7 @@ from dapr_agents.agents.configs import (
     AgentStateConfig,
 )
 from dapr_agents.agents.durable import DurableAgent
+from dapr_agents.agents.base import AgentBase
 from dapr_agents.llm import OpenAIChatClient
 from dapr_agents.storage.daprstores.stateservice import StateStoreService
 
@@ -122,3 +123,84 @@ def test_add_activation_after_hosting_window_closed_raises(agent):
 
     with pytest.raises(RuntimeError):
         agent.add_activation(lambda ctx: None)
+
+
+def test_pre_start_registration_is_opt_in_and_returns_a_copy(agent):
+    before, after = Mock(), Mock()
+    agent.add_activation(before, before_start=True)
+    agent.add_activation(after)
+
+    assert agent.pre_start_activations == [before]
+    assert agent.activations == [after]
+    agent.pre_start_activations.clear()
+    assert agent.pre_start_activations == [before]
+
+
+def test_pre_start_registration_rejects_an_already_started_agent(agent):
+    agent._started = True
+    with pytest.raises(RuntimeError, match="runtime has started"):
+        agent.add_activation(lambda ctx: None, before_start=True)
+    assert agent.pre_start_activations == []
+
+
+def test_pre_start_registration_rejects_a_closed_window(agent):
+    agent._activation_window_open = False
+    with pytest.raises(RuntimeError, match="has been hosted"):
+        agent.add_activation(lambda ctx: None, before_start=True)
+
+
+def test_start_prepares_after_configuration_and_registration_before_worker(
+    agent, monkeypatch
+):
+    order = []
+    monkeypatch.setattr(agent, "_runtime", Mock())
+    monkeypatch.setattr(AgentBase, "start", lambda self: order.append("configuration"))
+    monkeypatch.setattr(agent, "_restore_pending_approvals", Mock())
+    monkeypatch.setattr(
+        agent, "register_workflows", lambda runtime: order.append("registration")
+    )
+    agent.runtime.start.side_effect = lambda: order.append("worker")
+
+    agent.start(prepare=lambda: order.append("preparation"))
+
+    assert order == ["configuration", "registration", "preparation", "worker"]
+
+
+def test_start_preparation_failure_cleans_base_resources_without_starting_worker(
+    agent, monkeypatch
+):
+    monkeypatch.setattr(agent, "_runtime", Mock())
+    monkeypatch.setattr(AgentBase, "start", Mock())
+    cleanup = Mock()
+    monkeypatch.setattr(AgentBase, "stop", cleanup)
+    monkeypatch.setattr(agent, "_restore_pending_approvals", Mock())
+    monkeypatch.setattr(agent, "register_workflows", Mock())
+
+    with pytest.raises(ValueError, match="preparation failed"):
+        agent.start(prepare=Mock(side_effect=ValueError("preparation failed")))
+
+    agent.runtime.start.assert_not_called()
+    cleanup.assert_called_once()
+    assert not agent.is_started
+
+
+def test_prepared_start_does_not_disguise_worker_failure_as_already_running(
+    agent, monkeypatch
+):
+    runtime = Mock()
+    runtime.start.side_effect = RuntimeError("worker unavailable")
+    monkeypatch.setattr(agent, "_runtime", runtime)
+    monkeypatch.setattr(AgentBase, "start", Mock())
+    cleanup = Mock()
+    monkeypatch.setattr(AgentBase, "stop", cleanup)
+    monkeypatch.setattr(agent, "_restore_pending_approvals", Mock())
+    monkeypatch.setattr(agent, "register_workflows", Mock())
+    prepare = Mock()
+
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        agent.start(prepare=prepare)
+
+    prepare.assert_called_once()
+    runtime.shutdown.assert_called_once()
+    cleanup.assert_called_once()
+    assert not agent.is_started

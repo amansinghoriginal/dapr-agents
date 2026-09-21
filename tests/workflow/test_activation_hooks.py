@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Event, get_ident
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -110,7 +112,12 @@ def setup_env(monkeypatch):
 @pytest.fixture(autouse=True)
 def stub_agent_lifecycle(monkeypatch):
     """Stub agent start/stop (they touch Dapr) so tests isolate activation."""
-    monkeypatch.setattr(DurableAgent, "start", lambda self, *a, **k: None)
+
+    def start(self, *args, prepare=None, **kwargs):
+        if prepare is not None:
+            prepare()
+
+    monkeypatch.setattr(DurableAgent, "start", start)
     monkeypatch.setattr(DurableAgent, "stop", lambda self, *a, **k: None)
 
 
@@ -506,3 +513,233 @@ def test_no_activations_regression(host):
     assert agent in runner._managed_agents
     assert runner._activation_closers == {}
     runner.shutdown()  # must not raise
+
+
+def test_preparation_precedes_start_and_preserves_post_start_callbacks(monkeypatch):
+    agent, runner = _make_agent("Prepared"), _make_runner()
+    order = []
+
+    def start(*, prepare=None):
+        if prepare is not None:
+            prepare()
+        order.append("start")
+
+    monkeypatch.setattr(agent, "start", start)
+    agent.add_activation(lambda ctx: order.append("after"))
+    agent.add_activation(lambda ctx: order.append("before"), before_start=True)
+
+    runner.workflow(agent)
+
+    assert order == ["before", "start", "after"]
+    runner.shutdown()
+
+
+def test_preparation_failure_unwinds_without_starting_and_allows_retry(monkeypatch):
+    agent, runner = _make_agent("PrepareFailure"), _make_runner()
+    runtime_start = Mock()
+    close = Mock()
+    fail = True
+
+    def start(*, prepare=None):
+        if prepare is not None:
+            prepare()
+        runtime_start()
+
+    monkeypatch.setattr(agent, "start", start)
+    agent.add_activation(lambda ctx: close, before_start=True)
+
+    def prepare(ctx):
+        if fail:
+            raise ValueError("preparation failed")
+
+    agent.add_activation(prepare, before_start=True)
+    with pytest.raises(RuntimeError, match="preparation failed"):
+        runner.workflow(agent)
+
+    runtime_start.assert_not_called()
+    close.assert_called_once()
+    assert agent not in runner._managed_agents
+    assert id(agent) not in runner._preparing_agent_ids
+    fail = False
+    runner.workflow(agent)
+    runtime_start.assert_called_once()
+    runner.shutdown()
+    assert close.call_count == 2
+
+
+def test_post_start_failure_also_unwinds_preparation(monkeypatch):
+    agent, runner = _make_agent("PostFailure"), _make_runner()
+    order = []
+
+    def start(*, prepare=None):
+        if prepare is not None:
+            prepare()
+        order.append("start")
+
+    monkeypatch.setattr(agent, "start", start)
+    monkeypatch.setattr(agent, "stop", lambda: order.append("stop"))
+    agent.add_activation(
+        lambda ctx: lambda: order.append("close preparation"), before_start=True
+    )
+    agent.add_activation(lambda ctx: lambda: order.append("close activation"))
+
+    def fail(ctx):
+        raise ValueError("post-start failure")
+
+    agent.add_activation(fail)
+    with pytest.raises(RuntimeError, match="post-start failure"):
+        runner.workflow(agent)
+    assert order == ["start", "stop", "close activation", "close preparation"]
+
+
+def test_preparation_cannot_attach_after_manual_runtime_start():
+    agent, runner = _make_agent("LatePrepare"), _make_runner()
+    prepare = Mock()
+    agent.add_activation(prepare, before_start=True)
+    agent._started = True
+
+    with pytest.raises(RuntimeError, match="requires preparation"):
+        runner.workflow(agent)
+    prepare.assert_not_called()
+    assert agent not in runner._managed_agents
+
+
+def test_preparation_reentrancy_cannot_admit_unprepared_work():
+    agent, runner = _make_agent("ReentrantPrepare"), _make_runner()
+    agent.add_activation(lambda ctx: runner.workflow(agent), before_start=True)
+
+    with pytest.raises(RuntimeError, match="preparation is running"):
+        runner.workflow(agent)
+    assert agent not in runner._managed_agents
+
+
+def test_existing_post_start_reentrancy_still_works():
+    agent, runner = _make_agent("ReentrantActivation"), _make_runner()
+    calls = []
+
+    def activate(ctx):
+        calls.append(ctx)
+        runner.workflow(agent)
+
+    agent.add_activation(activate)
+    runner.workflow(agent)
+    assert len(calls) == 1
+    runner.shutdown()
+
+
+@pytest.mark.parametrize("per_agent", (False, True))
+def test_preparation_resources_outlive_worker_shutdown(monkeypatch, per_agent):
+    agent, runner = _make_agent("PreparedShutdown"), _make_runner()
+    order = []
+    monkeypatch.setattr(agent, "stop", lambda: order.append("stop"))
+    agent.add_activation(
+        lambda ctx: lambda: order.append("close resources"), before_start=True
+    )
+    runner.workflow(agent)
+
+    runner.shutdown(agent if per_agent else None)
+
+    assert order == ["stop", "close resources"]
+
+
+def test_concurrent_hosts_wait_for_one_completed_preparation():
+    agent, runner = _make_agent("ConcurrentPrepare"), _make_runner()
+    entered, release = Event(), Event()
+    calls = []
+
+    def prepare(ctx):
+        calls.append(ctx)
+        entered.set()
+        assert release.wait(3)
+
+    agent.add_activation(prepare, before_start=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(runner.workflow, agent)
+        try:
+            assert entered.wait(3)
+            second = pool.submit(runner.workflow, agent)
+            assert not second.done()
+        finally:
+            release.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+    assert len(calls) == 1
+    runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_run_awaits_offloaded_preparation():
+    agent, runner = _make_agent("AsyncPrepare"), _make_runner()
+    entered, release = Event(), Event()
+    caller_thread = get_ident()
+    preparation_threads = []
+
+    def prepare(ctx):
+        preparation_threads.append(get_ident())
+        entered.set()
+        assert release.wait(3)
+
+    agent.add_activation(prepare, before_start=True)
+    pending = asyncio.create_task(runner.run(agent, wait=False))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        runner.run_workflow_async.assert_not_awaited()
+        assert len(preparation_threads) == 1
+        assert preparation_threads[0] != caller_thread
+    finally:
+        release.set()
+    await pending
+    runner.run_workflow_async.assert_awaited_once()
+    runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_joins_preparation_without_orphaning_resources():
+    agent, runner = _make_agent("CancelledPrepare"), _make_runner()
+    entered, release = Event(), Event()
+    close = Mock()
+
+    def prepare(ctx):
+        entered.set()
+        assert release.wait(3)
+        return close
+
+    agent.add_activation(prepare, before_start=True)
+    pending = asyncio.create_task(runner.run(agent, wait=False))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    runner.run_workflow_async.assert_not_awaited()
+    assert agent in runner._managed_agents
+    runner.shutdown()
+    close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_streaming_uses_both_activation_phases_and_normal_cleanup():
+    agent, runner = _make_agent("StreamingPrepare"), _make_runner()
+    before, before_calls, before_closes = _spy()
+    after, after_calls, after_closes = _spy()
+    agent.add_activation(before, before_start=True)
+    agent.add_activation(after)
+    consumer = MagicMock()
+    consumer.astart = AsyncMock()
+    consumer.aclose = AsyncMock()
+    consumer.__aiter__.return_value = iter(())
+    runner._resolve_default_listener = Mock(return_value={"type": "in_process"})
+    runner._build_stream_consumer = Mock(return_value=consumer)
+
+    assert [chunk async for chunk in runner.run_stream(agent, "task")] == []
+
+    assert len(before_calls) == len(after_calls) == 1
+    assert before_calls[0].wf_client is runner._wf_client
+    consumer.astart.assert_awaited_once()
+    consumer.aclose.assert_awaited_once()
+    runner.shutdown()
+    assert before_closes == after_closes == [1]

@@ -18,6 +18,7 @@ limitations under the License.
 ## Features
 
 - Directly trigger agents from Drasi change events via Dapr pub/sub
+- Let an agent select persistent subscriptions from an operator-curated router catalog
 
 ## Getting Started
 
@@ -38,14 +39,15 @@ Installing this source version requires Git and access to the public Drasi Platf
 ```python
 from dapr_agents.ext.drasi import (
     register_drasi_trigger,         # Register author-configured Drasi query triggers
+    enable_drasi_subscriptions,     # Enable agent-managed persistent subscriptions
     DrasiChangeEvent,               # Type for Drasi change events
     DrasiOperation,                 # Operation type for Drasi change events
 )
 ```
 
-`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias. It preserves the existing unpacked change-event format and task-mapping behavior. The future agent-managed entry point, `enable_drasi_subscriptions()`, is not yet exported.
+`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias and preserves the existing unpacked change-event format and task-mapping behavior. `enable_drasi_subscriptions()` provides the alternative agent-managed mode.
 
-### Usage
+### Author-configured triggers
 
 Register a Drasi query subscription on an agent before hosting. Call the helper several times to register different fixed queries on the same agent. Static triggers and agent-managed subscriptions cannot be combined on one agent.
 
@@ -65,6 +67,43 @@ try:
 finally:
     runner.shutdown(agent)
 ```
+
+### Agent-managed subscriptions
+
+Configure an ordinary `DurableAgent` with its LLM, action tools, `AgentStateConfig.store`, and Pub/Sub component, then enable subscriptions before hosting it:
+
+```python
+enable_drasi_subscriptions(
+    agent,
+    router_id="drasi-system/sre-router-reaction",
+    namespace="applications",
+)
+
+runner = AgentRunner()
+try:
+    await runner.run(
+        agent,
+        {"task": "Monitor service errors and record an assessment when they change."},
+        wait=False,
+    )
+    await wait_for_shutdown()
+finally:
+    runner.shutdown(agent)
+```
+
+`router_id` is the router's `<namespace>/<app-id>` identity. `namespace` is the subscriber application's namespace and must be supplied explicitly. Application ID, exact logical agent name, runtime state store, and workflow name come from the agent. `pubsub=` optionally overrides the agent's bus; `dapr_http_port=` optionally overrides the SDK's `DAPR_HTTP_PORT` setting. Neither the state component nor subscriber identity is chosen by the LLM.
+
+Registration performs no network I/O. At hosting time the extension verifies sidecar identity/components, retrieves the catalog, checks tool-name collisions, initializes genuinely absent intent, and reconciles saved intent. It attaches generated tools and opens the derived inbox/DLT before the workflow worker starts. Preparation runs after the agent's startup configuration is loaded; changing the registered identity or infrastructure fails explicitly. An empty catalog still exposes `list_drasi_subscriptions()`.
+
+Generated tools are added to the existing executor without rebuilding prompts or replacing ordinary tools. They remain available in independent event workflows. An initially tool-less agent gets automatic tool selection; explicit author tool policies are preserved. This capability requires the ordinary chat/tool loop: external `executor=` runtimes and orchestrators are rejected rather than silently receiving tools they cannot use. No special startup model turn is performed.
+
+Use one Drasi-enabled logical agent per Dapr application and one reference application replica. Static and dynamic registration cannot be mixed, and dynamic enablement cannot be repeated on one agent. A process-local guard rejects another hosted Drasi agent with the same known application ID; it does not enforce this restriction across processes or deployments. Multiple static query registrations on one agent remain supported.
+
+The intent component must support ETags and honor strong reads. State/router errors fail preparation instead of producing an empty subscription set. Tool-name collisions and missing state, bus, or router configuration are actionable errors, not partially usable capabilities.
+
+Failed preparation closes acquired runtime resources and removes only the generated tools it attached. Normal shutdown closes the inbox/router and detaches those tools without unsubscribing or deleting durable intent. Re-hosting prepares fresh resources and tool bindings, including pending-operation recovery. The runner owns its Dapr/workflow clients; the agent retains its state store. If a workflow runtime was supplied by the application, its owner must stop it before shutting down the runner.
+
+`run()` and `run_stream()` await offloaded preparation. Synchronous hosting methods remain blocking; when using them from an async application, await `asyncio.to_thread(runner.workflow, agent)` or the corresponding synchronous hosting call.
 
 ### Examples
 - [Drasi Change-Driven Agents on Kubernetes](../../examples/ext-drasi-change-driven-agents-k8s/README.md) — demonstrates how to subscribe an agent to Drasi queries in a Kubernetes environment.
@@ -93,7 +132,7 @@ See the `Code Quality` section in the [development README](../../docs/developmen
 
 ### Agent-managed internal contracts
 
-`_models.py` and `_interfaces.py` define the private F2 baseline for independent implementation lanes. They do not implement agent-managed subscriptions or export `enable_drasi_subscriptions()`. Changes to these shared contracts and fixtures belong in one coordinated foundation follow-up, rather than conflicting edits in individual lanes.
+`_models.py` and `_interfaces.py` define the private component contracts. The public `enable_drasi_subscriptions()` helper composes their completed implementations. Changes to these shared contracts and fixtures belong in one coordinated foundation follow-up, rather than conflicting edits in individual lanes.
 
 #### Configuration and ownership
 
@@ -151,7 +190,7 @@ Startup reasserts active/pending subscriptions, completes pending unsubscription
 
 The private `intent_store.DaprIntentRepository(scope=..., store=...)` implements the repository boundary using the agent's configured `AgentStateConfig.store` (also exposed as `agent.state_store`). It borrows the existing raw Dapr state primitive and its configured factory, retaining the service's key prefix without applying its optional workflow model, local mirroring, or blanket retries. It does not change or close the configured service.
 
-The storage key is `<service key prefix>drasi:intent:<scope.inbox_topic>`. The shared inbox identity includes the router, subscriber namespace, application, and exact agent name; queries live inside that document. Reads also validate the embedded scope. The format version remains in the document so an unsupported version cannot be mistaken for a new, absent key. The component must support ETags; nonempty data without a usable ETag fails as unavailable, and empty data with a nonempty ETag is corrupt. The native SDK represents absence with empty data and `etag=""`, not `None`. Its GetState response has no separate existence flag, so a backend with empty, untagged records cannot be distinguished from absence and is unsupported. Reads always consult storage and return detached snapshots, including pending and retired-query intent.
+The storage key is `<service key prefix>drasi:intent:<scope.inbox_topic>`. The shared inbox identity includes the router, subscriber namespace, application, and exact agent name; queries live inside that document. Reads also validate the embedded scope. The format version remains in the document so an unsupported version cannot be mistaken for a new, absent key. The component must support ETags; nonempty data without a usable ETag fails as unavailable, and empty data with a nonempty ETag is corrupt. The native SDK represents absence with empty data and `etag=""`, not `None`. Its GetState response has no separate existence flag, so a backend with empty, untagged records cannot be distinguished from absence and is unsupported. Reads explicitly request strong consistency and return detached snapshots, including pending and retired-query intent. Because the pinned SDK's `get_state()` wrapper does not expose consistency, the adapter sends a native GetState request through the configured client's channel and unchanged read retry policy. The component must honor strong reads; ETags alone cannot prevent admission against stale intent.
 
 Initialization is unconditional and restricted by the caller to exclusive preparation. Subsequent saves pass the expected document ETag with first-write-wins and strong write consistency. A gRPC `ABORTED` conditional save is a conflict; other transport failures are unavailable, and may follow a committed write. Each write uses a fresh client from the configured primitive's factory and explicitly disables SDK retries on that client. Otherwise, a committed write with a lost reply could be retried with its stale ETag and incorrectly reported as a conflict. The configured factory, read retry policy, and runtime-side resiliency policies are unchanged. The adapter does not retry or repair writes: callers reload after success or uncertain failure and merge against fresh state after conflicts. It adds no TTL, automatic deletion, router calls, or catalog filtering.
 
@@ -213,13 +252,13 @@ Extension-local `tests/conftest.py` and `tests/fakes.py` provide contract-backed
 | D2 | `delivery.py`: inbox/DLT lifecycle, transport dispositions and scheduling acceptance |
 | I1 | Completed activation/composition, tool attachment, mode exclusion and public export |
 
-Two known integration risks remain with their later owners. **I1:** `AgentRunner.run_stream()` bypasses activation attachment; supporting it needs an explicit preparation solution. **D2:** the generic filter/mapper path collapses some errors into non-matches/`DROP`, and its asynchronous path may acknowledge local enqueue. Neither core runner nor generic routing/scheduling behavior is changed by F2.
+Composition uses `DurableAgent.add_activation(..., before_start=True)`. Preparation completes after startup configuration and workflow registration but before worker execution; existing activation callbacks retain their default post-start behavior. Every runner hosting path, including streaming, participates in attachment and cleanup. Generated tools are removed by instance identity through `AgentToolExecutor.unregister_tool()` so rollback cannot remove an ordinary same-name replacement. Delivery uses the extension-owned adapter rather than the generic filter/mapper path.
 
 #### Generated subscription tools
 
 The private `subscription_tools.build_subscription_tools(catalog, manager)` factory returns ordinary synchronous `AgentTool` objects without performing network/state I/O or changing an agent. Each cached query gets subscribe/unsubscribe tools with bounded, deterministic names containing a digest of the exact query ID. Subscribe accepts only explicit, distinct `i/u/d` operations and non-blank, self-contained handling instructions. `list_drasi_subscriptions()` is always present, including for an empty catalog, and reports local intent rather than live router state.
 
-The tools borrow the F2 management interface and preserve classified command failures as error results. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. I1 owns attachment to the existing executor, collision checks against existing tools, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
+The tools borrow the F2 management interface and preserve classified command failures as error results, including the unsubscribe-before-resubscribe guidance for retained unavailable intent. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. The public enablement helper owns attachment to the existing executor, collision checks, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
 
 ### Regenerate Drasi models
 

@@ -113,8 +113,24 @@ class _Backend:
         client.__enter__.return_value = client
         client.get_state.side_effect = self.get_state
         client.save_state.side_effect = self.save_state
+        client.retry_policy = RetryPolicy(max_attempts=0)
+        client._stub = MagicMock()
+        client._stub.GetState.with_call.side_effect = self.get_rpc
         self.clients.append(client)
         return client
+
+    def get_rpc(
+        self, request: api_v1.GetStateRequest, *, metadata: object
+    ) -> tuple[StateResponse, MagicMock]:
+        assert request.consistency == Consistency.strong.value
+        return (
+            self.get_state(
+                store_name=request.store_name,
+                key=request.key,
+                state_metadata=dict(request.metadata),
+            ),
+            MagicMock(),
+        )
 
     def get_state(
         self, *, store_name: str, key: str, state_metadata: dict[str, str] | None
@@ -283,11 +299,11 @@ def test_configured_primitive_prefix_and_options_are_preserved(
             "contentType": "application/json",
             "partitionKey": _key(scope)[1],
         }
-    backend.clients[1].get_state.assert_called_once_with(
-        store_name=_STORE_NAME,
-        key=_key(scope)[1],
-        state_metadata=backend.writes[0].metadata,
-    )
+    request = backend.clients[1]._stub.GetState.with_call.call_args.args[0]
+    assert request.store_name == _STORE_NAME
+    assert request.key == _key(scope)[1]
+    assert dict(request.metadata) == backend.writes[0].metadata
+    assert request.consistency == Consistency.strong.value
 
 
 def test_initialize_is_unconditional_and_etags_require_reloading(
@@ -798,3 +814,56 @@ def test_native_sdk_missing_state_and_string_etag_semantics(
             assert snapshot.document == intent_document
             assert snapshot.etag == "0"
     stub.SaveState.with_call.assert_not_called()
+
+
+@pytest.mark.parametrize("pending_unsubscribe", (False, True))
+def test_admission_uses_strong_reads_instead_of_stale_replica_intent(
+    scope: SubscriptionScope,
+    active_intent: SubscriptionIntent,
+    insert_delivery,
+    pending_unsubscribe: bool,
+) -> None:
+    from drasi_agent_router_contracts import to_wire
+
+    from dapr_agents.ext.drasi._models import Discard, SchedulingInput
+    from dapr_agents.ext.drasi.admission import DrasiAdmissionHandler
+
+    active = IntentDocument(
+        format_version=1, scope=scope, intents={active_intent.query_id: active_intent}
+    )
+    if pending_unsubscribe:
+        stale = active
+        current = active.model_copy(deep=True)
+        current.intents[active_intent.query_id].status = "pending_unsubscribe"
+    else:
+        stale = IntentDocument(format_version=1, scope=scope, intents={})
+        current = active
+
+    stub = MagicMock()
+
+    def get_rpc(request: api_v1.GetStateRequest, *, metadata: object):
+        document = current if request.consistency == Consistency.strong.value else stale
+        return (
+            api_v1.GetStateResponse(
+                data=document.model_dump_json().encode(), etag="current"
+            ),
+            MagicMock(),
+        )
+
+    stub.GetState.with_call.side_effect = get_rpc
+    repository = DaprIntentRepository(
+        scope=scope,
+        store=StateStoreService(
+            store_name=_STORE_NAME,
+            client_factory=lambda: _native_sdk_client(
+                stub, RetryPolicy(max_attempts=0)
+            ),
+        ),
+    )
+    result = DrasiAdmissionHandler(scope=scope, intents=repository).admit(
+        to_wire(insert_delivery)
+    )
+    if pending_unsubscribe:
+        assert result == Discard(reason="pending_unsubscribe")
+    else:
+        assert isinstance(result, SchedulingInput)
