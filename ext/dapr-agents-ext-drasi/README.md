@@ -179,6 +179,12 @@ Extension-local `tests/conftest.py` and `tests/fakes.py` provide contract-backed
 
 Two known integration risks remain with their later owners. **I1:** `AgentRunner.run_stream()` bypasses activation attachment; supporting it needs an explicit preparation solution. **D2:** the generic filter/mapper path collapses some errors into non-matches/`DROP`, and its asynchronous path may acknowledge local enqueue. Neither core runner nor generic routing/scheduling behavior is changed by F2.
 
+#### Generated subscription tools
+
+The private `subscription_tools.build_subscription_tools(catalog, manager)` factory returns ordinary synchronous `AgentTool` objects without performing network/state I/O or changing an agent. Each cached query gets subscribe/unsubscribe tools with bounded, deterministic names containing a digest of the exact query ID. Subscribe accepts only explicit, distinct `i/u/d` operations and non-blank, self-contained handling instructions. `list_drasi_subscriptions()` is always present, including for an empty catalog, and reports local intent rather than live router state.
+
+The tools borrow the F2 management interface and preserve classified command failures as error results. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. I1 owns attachment to the existing executor, collision checks against existing tools, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
+
 ### Regenerate Drasi models
 
 See the [provenance file](./PROVENANCE.md) for context.
