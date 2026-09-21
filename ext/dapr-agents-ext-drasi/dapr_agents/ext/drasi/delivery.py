@@ -61,7 +61,7 @@ def _handle_message(
             return TopicEventResponse(TopicEventResponseStatus.drop)
         # The SDK has already separated CloudEvent metadata from these data bytes.
         data = json.loads(message.raw_data().decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
         logger.warning(
             "Drasi inbox could not decode JSON data; requesting dead letter."
         )
@@ -143,14 +143,12 @@ def subscribe_drasi_inbox(
 
     stopped = Event()
     close_lock = Lock()
-    subscription_closed = False
     failure: DrasiDeliveryError | None = None
 
     def close_subscription() -> None:
-        nonlocal subscription_closed
+        # An in-flight SDK reconnect can replace a stream after a close request.
+        # Final consumer cleanup must close the current stream again.
         with close_lock:
-            if subscription_closed:
-                return
             try:
                 subscription.close()
             except Exception as error:
@@ -160,7 +158,6 @@ def subscribe_drasi_inbox(
                 raise DrasiDeliveryError(
                     "Could not close the Drasi inbox stream."
                 ) from None
-            subscription_closed = True
 
     def consume() -> None:
         nonlocal failure

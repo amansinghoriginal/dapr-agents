@@ -161,6 +161,18 @@ def handle(
     )
 
 
+@pytest.fixture
+def deeply_nested_json() -> bytes:
+    # Newer Python decoders use a C-stack limit, not sys.getrecursionlimit().
+    for depth in (2048, 4096, 8192, 16384, 32768, 65536):
+        text = "[" * depth + "0" + "]" * depth
+        try:
+            json.loads(text)
+        except RecursionError:
+            return b"[" * (depth * 2) + b"0" + b"]" * (depth * 2)
+    pytest.skip("This decoder has no nesting limit within the bounded probe.")
+
+
 def _request(
     event: AgentDelivery,
     *,
@@ -283,6 +295,20 @@ def test_malformed_json_requests_dead_letters_without_admission(
     data: bytes,
 ) -> None:
     message = SubscriptionMessage(_request(insert_delivery, data=data))
+
+    assert handle(message).status == TopicEventResponseStatus.drop
+    admission.admit.assert_not_called()
+    workflow.schedule_new_workflow.assert_not_called()
+
+
+def test_excessively_nested_json_is_poison_not_a_consumer_failure(
+    handle: Callable[[SubscriptionMessage], TopicEventResponse],
+    admission: Mock,
+    workflow: MagicMock,
+    insert_delivery: AgentDelivery,
+    deeply_nested_json: bytes,
+) -> None:
+    message = SubscriptionMessage(_request(insert_delivery, data=deeply_nested_json))
 
     assert handle(message).status == TopicEventResponseStatus.drop
     admission.admit.assert_not_called()
@@ -557,6 +583,46 @@ def test_scheduler_failure_is_a_retry_on_the_live_consumer(
             message,
             TopicEventResponseStatus.retry,
         )
+    finally:
+        close()
+
+
+def test_consumer_dead_letters_deep_json_and_continues_with_valid_deliveries(
+    config: ResolvedDrasiConfig,
+    admission: Mock,
+    client: MagicMock,
+    workflow: MagicMock,
+    stream: _Stream,
+    insert_delivery: AgentDelivery,
+    deeply_nested_json: bytes,
+) -> None:
+    poison = SubscriptionMessage(
+        _request(
+            insert_delivery,
+            data=deeply_nested_json,
+            publication_id="poison-publication",
+        )
+    )
+    valid = _message(insert_delivery)
+    close = subscribe_drasi_inbox(
+        config=config,
+        admission=admission,
+        dapr_client=client,
+        workflow_client=workflow,
+    )
+    try:
+        stream.messages.put(poison)
+        stream.messages.put(valid)
+        assert stream.responses.get(timeout=5) == (
+            poison,
+            TopicEventResponseStatus.drop,
+        )
+        assert stream.responses.get(timeout=5) == (
+            valid,
+            TopicEventResponseStatus.success,
+        )
+        admission.admit.assert_called_once_with(to_wire(insert_delivery))
+        assert not stream.closed.is_set()
     finally:
         close()
 
@@ -866,6 +932,64 @@ class _NativeStream:
         self.cancelled = True
         self.messages.put(_RpcFailure(StatusCode.CANCELLED))
         return True
+
+
+def test_shutdown_closes_the_sdk_stream_reopened_during_an_inflight_reconnect(
+    config: ResolvedDrasiConfig,
+    admission: Mock,
+    client: MagicMock,
+    workflow: MagicMock,
+    mocker: MockerFixture,
+) -> None:
+    original_stream = _NativeStream()
+    replacement_stream = _NativeStream()
+    stub = mocker.Mock()
+    stub.SubscribeTopicEventsAlpha1.side_effect = (original_stream, replacement_stream)
+    subscription = Subscription(
+        stub,
+        config.pubsub_name,
+        config.scope.inbox_topic,
+        dead_letter_topic=config.scope.dead_letter_topic,
+    )
+    subscription.start()
+    client.subscribe.return_value = subscription
+    reconnect_waiting = Event()
+    allow_reconnect = Event()
+
+    def wait_for_sidecar() -> None:
+        reconnect_waiting.set()
+        assert allow_reconnect.wait(timeout=5)
+
+    mocker.patch(
+        "dapr.clients.grpc.subscription.DaprHealth.wait_for_sidecar",
+        side_effect=wait_for_sidecar,
+    )
+    original_close = subscription.close
+
+    def close_stream() -> None:
+        original_close()
+        if reconnect_waiting.is_set():
+            allow_reconnect.set()
+
+    mocker.patch.object(subscription, "close", side_effect=close_stream)
+    close = subscribe_drasi_inbox(
+        config=config,
+        admission=admission,
+        dapr_client=client,
+        workflow_client=workflow,
+    )
+    try:
+        original_stream.messages.put(_RpcFailure(StatusCode.UNAVAILABLE))
+        assert reconnect_waiting.wait(timeout=5)
+        close()
+        assert replacement_stream.cancelled
+        assert not subscription._is_stream_active()
+        admission.admit.assert_not_called()
+        workflow.schedule_new_workflow.assert_not_called()
+    finally:
+        allow_reconnect.set()
+        original_close()
+        close()
 
 
 @pytest.mark.parametrize(
