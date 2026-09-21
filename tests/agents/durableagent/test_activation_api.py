@@ -204,3 +204,30 @@ def test_prepared_start_does_not_disguise_worker_failure_as_already_running(
     runtime.shutdown.assert_called_once()
     cleanup.assert_called_once()
     assert not agent.is_started
+
+
+@pytest.mark.parametrize("passed_to_start", (False, True))
+def test_preparation_rejects_borrowed_runtime_before_registering_workflows(
+    agent, monkeypatch, passed_to_start
+):
+    borrowed = Mock()
+    configure = Mock()
+    register = Mock()
+    prepare = Mock()
+    monkeypatch.setattr(AgentBase, "start", configure)
+    monkeypatch.setattr(agent, "register_workflows", register)
+    if not passed_to_start:
+        agent._runtime = borrowed
+        agent._runtime_owned = False
+
+    with pytest.raises(RuntimeError, match="agent-owned workflow runtime"):
+        agent.start(
+            runtime=borrowed if passed_to_start else None,
+            prepare=prepare,
+        )
+
+    configure.assert_not_called()
+    register.assert_not_called()
+    prepare.assert_not_called()
+    borrowed.start.assert_not_called()
+    borrowed.shutdown.assert_not_called()

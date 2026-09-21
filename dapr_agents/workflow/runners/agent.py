@@ -180,6 +180,7 @@ class AgentRunner(WorkflowRunner):
         #   _activation_closers  — teardown closers per agent, drained on shutdown
         self._activated_agent_ids: set[int] = set()
         self._preparing_agent_ids: set[int] = set()
+        self._activation_close_failures: set[int] = set()
         self._activation_closers: Dict[int, List[Callable[[], None]]] = {}
 
     @staticmethod
@@ -1505,6 +1506,11 @@ class AgentRunner(WorkflowRunner):
             self._attach_agent_locked(agent, app)
 
     def _attach_agent_locked(self, agent: DurableAgent, app: Optional[FastAPI]) -> None:
+        if id(agent) in self._activation_close_failures:
+            raise RuntimeError(
+                f"Agent {agent.name!r} has unfinished activation cleanup; "
+                "retry shutdown before hosting it again."
+            )
         if id(agent) in self._preparing_agent_ids:
             raise RuntimeError(
                 f"Agent {agent.name!r} cannot be hosted while its preparation is running."
@@ -1613,9 +1619,15 @@ class AgentRunner(WorkflowRunner):
             except Exception:
                 logger.exception("Error stopping prepared agent during attach rollback")
             started_here = False
-        self._rollback_activation_closers(collected)
+        failed_closers = self._rollback_activation_closers(collected)
         with self._lock:
-            self._activated_agent_ids.discard(id(agent))
+            if failed_closers:
+                self._activation_closers[id(agent)] = failed_closers
+                self._activated_agent_ids.add(id(agent))
+                self._activation_close_failures.add(id(agent))
+            else:
+                self._activated_agent_ids.discard(id(agent))
+                self._activation_close_failures.discard(id(agent))
             if added_here and agent in self._managed_agents:
                 self._managed_agents.remove(agent)
         if started_here:
@@ -1624,8 +1636,11 @@ class AgentRunner(WorkflowRunner):
             except Exception:
                 logger.exception("Error stopping agent during attach rollback")
 
-    def _rollback_activation_closers(self, closers: List[Callable[[], None]]) -> None:
+    def _rollback_activation_closers(
+        self, closers: List[Callable[[], None]]
+    ) -> List[Callable[[], None]]:
         """Best-effort close (reverse order) of closers from a failed attach."""
+        failed = []
         for close in reversed(closers):
             try:
                 close()
@@ -1633,9 +1648,11 @@ class AgentRunner(WorkflowRunner):
                 logger.exception(
                     "Error while rolling back activation closer after failure"
                 )
+                failed.append(close)
+        return list(reversed(failed))
 
     def _close_activations(self, agent: Optional[DurableAgent] = None) -> None:
-        """Invoke and clear activation teardown closers, resetting the guard.
+        """Close activations, retaining failed closers for a shutdown retry.
 
         With no ``agent`` every tracked closer runs and the guard is cleared (full
         shutdown). With an ``agent`` only that agent's closers run and its guard
@@ -1643,18 +1660,33 @@ class AgentRunner(WorkflowRunner):
         """
         with self._lock:
             if agent is None:
-                groups = list(self._activation_closers.values())
+                groups = list(self._activation_closers.items())
                 self._activation_closers.clear()
                 self._activated_agent_ids.clear()
+                self._activation_close_failures.clear()
             else:
-                groups = [self._activation_closers.pop(id(agent), [])]
+                groups = [(id(agent), self._activation_closers.pop(id(agent), []))]
                 self._activated_agent_ids.discard(id(agent))
-        for closers in groups:
+                self._activation_close_failures.discard(id(agent))
+        errors = []
+        for agent_id, closers in groups:
+            failed = []
             for close in reversed(closers):
                 try:
                     close()
-                except Exception:
+                except Exception as error:
                     logger.exception("Error while closing activation")
+                    failed.append(close)
+                    errors.append(error)
+            if failed:
+                with self._lock:
+                    self._activation_closers[agent_id] = list(reversed(failed))
+                    self._activated_agent_ids.add(agent_id)
+                    self._activation_close_failures.add(agent_id)
+        if errors:
+            raise ExceptionGroup(
+                "Could not close agent activations; retry shutdown.", errors
+            )
 
     def shutdown(self, agent: Optional[DurableAgent] = None) -> None:
         """
@@ -1688,14 +1720,15 @@ class AgentRunner(WorkflowRunner):
                     # this happens if the agent has no instrumentor
                     pass
                 agent.stop()  # This is safe as they'll return None if not started
-                self._close_activations(agent)
+            self._close_activations(agent)
             if last:
                 try:
                     self.unwire_pubsub()
                     self._close_activations()
                 finally:
-                    self._close_wf_client()
-                    self._close_dapr_client()
+                    if not self._activation_closers:
+                        self._close_wf_client()
+                        self._close_dapr_client()
             return
         stopped_prepared: set[int] = set()
         try:
@@ -1722,5 +1755,6 @@ class AgentRunner(WorkflowRunner):
                     pass
                 if id(ag) not in stopped_prepared:
                     ag.stop()
-            self._close_wf_client()
-            self._close_dapr_client()
+            if not self._activation_closers:
+                self._close_wf_client()
+                self._close_dapr_client()

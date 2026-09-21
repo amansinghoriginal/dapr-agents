@@ -93,7 +93,7 @@ class _Harness:
     metadata: _Metadata
     clients: list[MagicMock]
     streams: list[_Stream]
-    make_agent: Callable[[str, list[AgentTool]], DurableAgent]
+    make_agent: Callable[..., DurableAgent]
     client_factory: Callable[..., MagicMock]
     open_stream: Callable[..., _Stream]
 
@@ -153,7 +153,9 @@ def harness(
         subscription_manager, "uuid4", lambda: UUID(int=next(incarnations))
     )
 
-    def make_agent(name: str, tools: list[AgentTool]) -> DurableAgent:
+    def make_agent(
+        name: str, tools: list[AgentTool], *, tool_choice: str | None = "auto"
+    ) -> DurableAgent:
         runtime = MagicMock(spec=WorkflowRuntime)
         runtimes.append(runtime)
         monkeypatch.setattr(
@@ -176,7 +178,7 @@ def harness(
                 broadcast_topic="framework-broadcast",
             ),
             state=_state_config(backend),
-            execution=AgentExecutionConfig(builtin_tools=[]),
+            execution=AgentExecutionConfig(builtin_tools=[], tool_choice=tool_choice),
             agent_observability=AgentObservabilityConfig(enabled=False),
             mcp=AgentMCPConfig(enabled=False),
         )
@@ -445,6 +447,72 @@ def test_explicit_tool_policy_and_pubsub_override_are_preserved(harness: _Harnes
     )
     harness.runner.shutdown()
     assert harness.agent.execution.tool_choice == "none"
+
+
+@pytest.mark.parametrize("choice", ("none", "required", "auto"))
+def test_initially_toolless_agent_retains_its_explicit_tool_policy(
+    harness: _Harness, choice: str
+) -> None:
+    agent = harness.make_agent("InitiallyToolless", [], tool_choice=choice)
+    assert agent.execution.tool_choice is None
+    enable_drasi_subscriptions(
+        agent, router_id=harness.scope.router_id, namespace=harness.scope.namespace
+    )
+    harness.runner.workflow(agent)
+    assert agent.execution.tool_choice == choice
+    assert len(agent.get_llm_tools()) == 5
+    harness.runner.shutdown(agent)
+    assert agent.execution.tool_choice is None
+
+
+def test_borrowed_runtime_is_rejected_before_any_registration(harness: _Harness):
+    harness.agent._runtime_owned = False
+    with pytest.raises(ValueError, match="agent-owned workflow runtime"):
+        harness.enable()
+    assert harness.agent.pre_start_activations == []
+    harness.runtime.register_workflow.assert_not_called()
+    harness.runtime.start.assert_not_called()
+    harness.runtime.shutdown.assert_not_called()
+    assert harness.server.calls == []
+
+
+@pytest.mark.parametrize("per_agent", (False, True))
+def test_failed_inbox_cleanup_can_be_retried_without_releasing_a_live_owner(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, per_agent: bool
+) -> None:
+    harness.enable()
+    harness.runner.workflow(harness.agent)
+    stream = harness.streams[0]
+    close_stream = stream.close
+    failed = False
+
+    def close_once_fails() -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected stream close failure")
+        close_stream()
+
+    monkeypatch.setattr(stream, "close", close_once_fails)
+    client = harness.runner._dapr_client
+    with pytest.raises(ExceptionGroup, match="retry shutdown"):
+        harness.runner.shutdown(harness.agent if per_agent else None)
+
+    assert not stream.closed.is_set()
+    assert harness.scope.app_id in _registration._APPLICATION_OWNERS
+    assert len(harness.agent.get_llm_tools()) == 6
+    client.close.assert_not_called()
+    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
+        harness.runner.workflow(harness.agent)
+
+    harness.runner.shutdown(harness.agent if per_agent else None)
+
+    assert stream.closed.is_set()
+    assert harness.scope.app_id not in _registration._APPLICATION_OWNERS
+    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
+    client.close.assert_called_once()
+    harness.runner.workflow(harness.agent)
+    assert len(harness.streams) == 2
 
 
 @pytest.mark.parametrize("first_mode", ("static", "dynamic"))

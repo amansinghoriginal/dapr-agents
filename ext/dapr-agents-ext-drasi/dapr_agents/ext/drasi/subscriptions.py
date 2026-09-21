@@ -58,6 +58,11 @@ def _resolve_config(
             "Agent-managed Drasi subscriptions require the ordinary DurableAgent "
             "chat/tool loop, not executor= or orchestration mode."
         )
+    if not agent._runtime_owned:
+        _invalid(
+            "Agent-managed Drasi subscriptions require an agent-owned workflow "
+            "runtime. Omit runtime= and let AgentRunner manage its lifetime."
+        )
     store = agent.state_store
     if not isinstance(store, StateStoreService):
         _invalid(
@@ -206,10 +211,12 @@ def enable_drasi_subscriptions(
                 executor.register_tool(tool)
                 resources.callback(executor.unregister_tool, tool)
             if agent.execution.tool_choice is None:
-                agent.execution.tool_choice = "auto"
+                choice = agent._initial_tool_choice
+                attached_choice = choice if choice is not None else "auto"
+                agent.execution.tool_choice = attached_choice
 
                 def restore_tool_choice() -> None:
-                    if agent.execution.tool_choice == "auto":
+                    if agent.execution.tool_choice == attached_choice:
                         agent.execution.tool_choice = None
 
                 resources.callback(restore_tool_choice)
@@ -221,7 +228,14 @@ def enable_drasi_subscriptions(
                 dapr_client=context.dapr_client,
                 workflow_client=context.wf_client,
             )
-            resources.callback(close_inbox)
-            return resources.pop_all().close
+            prepared_resources = resources.pop_all()
+
+            def close() -> None:
+                # Keep the consumer's dependencies and ownership until it stops.
+                # A failed inbox close can be retried by the owning runner.
+                close_inbox()
+                prepared_resources.close()
+
+            return close
 
     register_activation(agent, mode="dynamic", callback=prepare, before_start=True)

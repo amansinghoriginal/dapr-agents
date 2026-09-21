@@ -642,6 +642,7 @@ class AgentBase:
         # Execution config
         # -----------------------------
         self.execution = execution or AgentExecutionConfig()
+        self._initial_tool_choice: Optional[str] = self.execution.tool_choice
         try:
             self.execution.max_iterations = max(1, int(self.execution.max_iterations))
         except Exception:

@@ -642,6 +642,54 @@ def test_preparation_resources_outlive_worker_shutdown(monkeypatch, per_agent):
     assert order == ["stop", "close resources"]
 
 
+@pytest.mark.parametrize("per_agent", (False, True))
+def test_failed_cleanup_is_visible_retryable_and_blocks_rehosting(per_agent):
+    agent, runner = _make_agent("RetryCleanup"), _make_runner()
+    failed = Mock(side_effect=[ValueError("close failed"), None])
+    completed = Mock()
+    agent.add_activation(lambda ctx: failed, before_start=True)
+    agent.add_activation(lambda ctx: completed)
+    runner.workflow(agent)
+    client = runner._dapr_client
+
+    with pytest.raises(ExceptionGroup, match="retry shutdown"):
+        runner.shutdown(agent if per_agent else None)
+
+    assert runner._dapr_client is client
+    assert runner._activation_closers[id(agent)] == [failed]
+    completed.assert_called_once()
+    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
+        runner.workflow(agent)
+
+    runner.shutdown(agent if per_agent else None)
+
+    assert failed.call_count == 2
+    completed.assert_called_once()
+    assert id(agent) not in runner._activation_close_failures
+    assert runner._dapr_client is None
+
+
+def test_failed_attach_cleanup_remains_owned_until_shutdown_retry():
+    agent, runner = _make_agent("RetryRollback"), _make_runner()
+    closer = Mock(side_effect=[ValueError("close failed"), None])
+    agent.add_activation(lambda ctx: closer, before_start=True)
+
+    def activation(ctx):
+        raise ValueError("activation failed")
+
+    agent.add_activation(activation)
+    with pytest.raises(RuntimeError, match="activation failed"):
+        runner.workflow(agent)
+    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
+        runner.workflow(agent)
+
+    runner.shutdown(agent)
+
+    assert closer.call_count == 2
+    assert runner._activation_closers == {}
+    assert runner._activation_close_failures == set()
+
+
 def test_concurrent_hosts_wait_for_one_completed_preparation():
     agent, runner = _make_agent("ConcurrentPrepare"), _make_runner()
     entered, release = Event(), Event()

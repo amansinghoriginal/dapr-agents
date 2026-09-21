@@ -4101,6 +4101,13 @@ class DurableAgent(AgentBase):
         """
         if self._started:
             raise RuntimeError("Agent has already been started.")
+        if prepare is not None and (runtime is not None or not self._runtime_owned):
+            message = (
+                "Pre-start preparation requires an agent-owned workflow runtime. "
+                "Omit runtime= and let AgentRunner manage its lifetime."
+            )
+            logger.error("%s", message)
+            raise RuntimeError(message)
 
         # Set up lifecycle-managed resources (e.g., configuration subscription)
         super().start()
