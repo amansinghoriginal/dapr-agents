@@ -32,14 +32,15 @@ ext/dapr-agents-ext-drasi/
 │   └── ext/
 │       └── drasi/                          # PEP 420 namespace package under dapr_agents.ext
 │           ├── __init__.py                 # Public package exports
-│           ├── activations.py              # drasi_trigger activation wiring
+│           ├── activations.py              # register_drasi_trigger activation wiring
+│           ├── _registration.py            # Private per-agent Drasi mode registration
 │           ├── types.py                    # Re-exported Drasi event models and public names
 │           ├── schemas/                    # Generated Drasi schema models
 │           │   └── unpacked/               # Generated model files (do not edit by hand)
 │           └── utils/
 │               └── validation.py           # Event/model validation helpers
 └── tests/
-    ├── test_drasi_trigger.py               # Activation wiring and trigger behavior tests
+    ├── test_register_drasi_trigger.py      # Activation wiring and trigger behavior tests
     ├── schemas/
     │   └── test_unpacked_event_models.py   # Generated event model smoke tests
     └── utils/
@@ -50,7 +51,7 @@ ext/dapr-agents-ext-drasi/
 
 ```mermaid
 flowchart LR
-    A["drasi_trigger"] --> R["register_message_routes"]
+    A["register_drasi_trigger"] --> R["register_message_routes"]
     R --> S["Pub/sub router"]
     S <--> T["Dapr streaming subscription"]
     S --> D["DurableAgent"]
@@ -59,7 +60,7 @@ flowchart LR
 
 The extension is intentionally thin:
 
-- `drasi_trigger` resolves and validates configuration at activation time.
+- `register_drasi_trigger` resolves and validates configuration at activation time.
 - Configuration is used to customize filtering/mapping/routing logic to be executed by the core pub/sub routing infrastructure via the `register_message_routes` interface.
 - Drasi change events arrive through Dapr pub/sub, pass through the core pub/sub routing infrastructure, and trigger agent workflows.
 
@@ -69,7 +70,7 @@ All public symbols are exported from `dapr_agents.ext.drasi`:
 
 ```python
 from dapr_agents.ext.drasi import (
-    drasi_trigger,      # Register Drasi query subscriptions for an agent
+    register_drasi_trigger,  # Register author-configured Drasi query triggers
     DrasiChangeEvent,   # Drasi change event model emitted by a query
     DrasiOperation,     # Drasi operation enum: i, u, or d
 )
@@ -88,8 +89,10 @@ Notes:
 
 - `dapr_agents.ext` is a PEP 420 namespace package. Do not add an
     `__init__.py` to `dapr_agents/ext/`; that would change import behavior.
-- `drasi_trigger` is activation-time wiring only. It does not start the agent
-    runtime by itself; it registers pub/sub routes on the target `DurableAgent`.
+- `register_drasi_trigger` is activation-time wiring only. It does not start the agent runtime by itself; it registers pub/sub routes on the target `DurableAgent`.
+- Multiple static query registrations on the same agent are supported. Static and future dynamic entry points must both use `_registration.register_activation` to prevent mixing modes in either registration order. Mode ownership remains attached to the agent across shutdown or failed hosting attempts.
+- The router contract dependency belongs to this extension and is pinned to a public Git revision. Do not copy its generated models or replace the existing unpacked static event models with router delivery models.
+- `enable_drasi_subscriptions()` is reserved for the complete dynamic implementation; do not export a placeholder.
 - The default topic is derived from the query ID as
     `drasi-events-<query_id>`.
 - If `pubsub` is omitted, the extension falls back to the agent's configured
@@ -124,12 +127,12 @@ Notes:
 - To run extension tests from the repo root:
 
     ```bash
-    uv run --group test pytest ext/dapr-agents-ext-drasi -m "not integration" -v
+    uv run --group test --extra drasi pytest ext/dapr-agents-ext-drasi -m "not integration" -v
     ```
 
 - Extension tests currently live in:
 
-    - `tests/test_drasi_trigger.py` — activation wiring and end-to-end trigger
+    - `tests/test_register_drasi_trigger.py` — activation wiring and end-to-end trigger
         behavior at the extension boundary
     - `tests/utils/test_validation.py` — validation helpers and schema
         coercion behavior

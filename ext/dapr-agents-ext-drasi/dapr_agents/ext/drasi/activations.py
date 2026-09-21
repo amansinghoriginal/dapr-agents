@@ -29,6 +29,7 @@ from dapr_agents.workflow.utils.subscription import (
     TTLDedupeBackend,
 )
 
+from dapr_agents.ext.drasi._registration import register_activation
 from dapr_agents.ext.drasi.types import DrasiOperation, DrasiChangeEvent
 from dapr_agents.ext.drasi.utils.validation import (
     is_supported_operation,
@@ -49,9 +50,9 @@ _DRASI_TRIGGER_DEFAULT_TOPIC_PREFIX = "drasi-events-"
 @dataclass(frozen=True)
 class _DrasiTriggerConfig:
     """
-    Immutable container to hold the resolved `drasi_trigger` configuration
+    Immutable container to hold the resolved `register_drasi_trigger` configuration
     so callers don't need to thread arguments through multiple call sites.
-    A single instance is created per `drasi_trigger` invocation; must not be shared.
+    A single instance is created per `register_drasi_trigger` invocation; must not be shared.
 
     Note: configuration is not guaranteed to be semantically valid; validation should be
     performed after instantiation.
@@ -283,7 +284,7 @@ def _subscribe(
     return closers
 
 
-def drasi_trigger(
+def register_drasi_trigger(
     agent: DurableAgent,
     *,
     query_id: str,
@@ -414,4 +415,4 @@ def drasi_trigger(
 
         return _close
 
-    agent.add_activation(_activate)
+    register_activation(agent, mode="static", callback=_activate)

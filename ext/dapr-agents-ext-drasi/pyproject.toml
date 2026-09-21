@@ -28,6 +28,7 @@ authors = [
 ]
 dependencies = [
     "dapr-agents>=1.0.6,<2.0.0",
+    "drasi-agent-router-contracts @ git+https://github.com/drasi-project/drasi-platform.git@49e8df694a16520519a1ba559f99c1a13a668431#subdirectory=typespec/dapr-agent-router/python",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",

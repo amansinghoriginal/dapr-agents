@@ -119,15 +119,19 @@ Running `dapr version` should show the runtime as `edge`, which confirms your lo
 The project uses pytest for testing. To run tests:
 
 ```bash
-# Run all tests
-uv run pytest
+# Run core and extension unit tests in separate processes
+uv run --group test pytest tests -m "not integration"
+uv run --group test --extra drasi pytest ext -m "not integration"
 
 # Run specific test file
 uv run pytest tests/test_random_orchestrator.py
 
 # Run tests with coverage
-uv run pytest --cov=dapr_agents
+uv run --group test pytest tests -m "not integration" --cov=dapr_agents
+uv run --group test --extra drasi pytest ext -m "not integration" --cov=dapr_agents.ext.drasi --cov-append
 ```
+
+Keep core and extension test collection separate: core collection can hide the extension namespace and cause extension tests to skip. The Drasi extra installs the extension and its pinned router contract dependency.
 
 ### Integration Tests
 

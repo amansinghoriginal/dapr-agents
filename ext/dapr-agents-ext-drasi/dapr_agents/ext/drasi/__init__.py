@@ -13,11 +13,11 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-from .activations import drasi_trigger
+from .activations import register_drasi_trigger
 from .types import DrasiChangeEvent, DrasiOperation
 
 __all__ = [
-    "drasi_trigger",
+    "register_drasi_trigger",
     "DrasiChangeEvent",
     "DrasiOperation",
 ]

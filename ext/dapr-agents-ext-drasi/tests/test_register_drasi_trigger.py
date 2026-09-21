@@ -42,7 +42,12 @@ from dapr_agents.types.exceptions import PubSubNotAvailableError
 from dapr_agents.workflow.runners.agent import AgentRunner
 
 try:
-    from dapr_agents.ext.drasi import DrasiOperation, drasi_trigger
+    from dapr_agents.ext.drasi import DrasiOperation, register_drasi_trigger
+    from dapr_agents.ext.drasi._registration import (
+        DrasiMode,
+        DrasiModeConflictError,
+        register_activation,
+    )
     from dapr_agents.ext.drasi.activations import (
         _DRASI_TRIGGER_DEFAULT_TASK,
         _DRASI_TRIGGER_DEFAULT_TOPIC_PREFIX,
@@ -407,7 +412,7 @@ def setup_deps():
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_uses_pubsub_under_subscribe(setup_deps):
+async def test_register_drasi_trigger_uses_pubsub_under_subscribe(setup_deps):
     """Test that the Drasi pub/sub trigger wires pub/sub routes using the runner's `subscribe()` entrypoint."""
     query_id = "ordersquery"
     agent_pubsub_name = "testpubsub"
@@ -461,7 +466,7 @@ async def test_drasi_trigger_uses_pubsub_under_subscribe(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -491,7 +496,7 @@ async def test_drasi_trigger_uses_pubsub_under_subscribe(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_uses_pubsub_under_register_routes(setup_deps):
+async def test_register_drasi_trigger_uses_pubsub_under_register_routes(setup_deps):
     """Test that the Drasi pub/sub trigger wires pub/sub routes using the runner's `register_routes()` entrypoint."""
     query_id = "incidentsquery"
     agent_pubsub_name = "testpubsub"
@@ -547,7 +552,7 @@ async def test_drasi_trigger_uses_pubsub_under_register_routes(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -575,7 +580,7 @@ async def test_drasi_trigger_uses_pubsub_under_register_routes(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_uses_pubsub_under_serve(setup_deps):
+async def test_register_drasi_trigger_uses_pubsub_under_serve(setup_deps):
     """Test that the Drasi pub/sub trigger wires pub/sub routes using the runner's `serve()` entrypoint."""
     query_id = "potentialfraudquery"
     agent_pubsub_name = "testpubsub"
@@ -632,7 +637,7 @@ async def test_drasi_trigger_uses_pubsub_under_serve(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -660,7 +665,9 @@ async def test_drasi_trigger_uses_pubsub_under_serve(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_uses_pubsub_independent_of_agent_pubsub(setup_deps):
+async def test_register_drasi_trigger_uses_pubsub_independent_of_agent_pubsub(
+    setup_deps,
+):
     """Test that the Drasi pub/sub trigger wires pub/sub routes when the agent's pub/sub configuration is missing."""
     query_id = "gamestatequery"
     drasi_pubsub_name = "gamestatepubsub"
@@ -728,7 +735,7 @@ async def test_drasi_trigger_uses_pubsub_independent_of_agent_pubsub(setup_deps)
     agent = make_agent()
     runner = make_runner(pubsub_names=[drasi_pubsub_name], event_stream=events)
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -756,7 +763,7 @@ async def test_drasi_trigger_uses_pubsub_independent_of_agent_pubsub(setup_deps)
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_defaults_to_agent_pubsub_component(setup_deps):
+async def test_register_drasi_trigger_defaults_to_agent_pubsub_component(setup_deps):
     """Test that the Drasi pub/sub trigger uses the agent's pub/sub component when the pub/sub component is omitted."""
     query_id = "searchquery"
     agent_pubsub_name = "testpubsub"
@@ -807,7 +814,7 @@ async def test_drasi_trigger_defaults_to_agent_pubsub_component(setup_deps):
     agent = make_agent(pubsub_name=agent_pubsub_name, topic=agent_topic)
     runner = make_runner(pubsub_names=[agent_pubsub_name], event_stream=events)
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         topic=drasi_topic,
@@ -834,7 +841,7 @@ async def test_drasi_trigger_defaults_to_agent_pubsub_component(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_defaults_to_derived_topic(setup_deps):
+async def test_register_drasi_trigger_defaults_to_derived_topic(setup_deps):
     """Test that the Drasi pub/sub trigger uses the query ID to derive the pub/sub topic when the topic is omitted."""
     query_id = "goalsquery"
     agent_pubsub_name = "testpubsub"
@@ -898,7 +905,7 @@ async def test_drasi_trigger_defaults_to_derived_topic(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -925,7 +932,7 @@ async def test_drasi_trigger_defaults_to_derived_topic(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_defaults_to_passthrough_task(setup_deps, caplog):
+async def test_register_drasi_trigger_defaults_to_passthrough_task(setup_deps, caplog):
     """Test that the Drasi pub/sub trigger uses the default pass-through task when the task mapper is omitted."""
     query_id = "passwordupdatequery"
     agent_pubsub_name = "testpubsub"
@@ -989,7 +996,9 @@ async def test_drasi_trigger_defaults_to_passthrough_task(setup_deps, caplog):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(agent, query_id=query_id, pubsub=drasi_pubsub_name, topic=drasi_topic)
+    register_drasi_trigger(
+        agent, query_id=query_id, pubsub=drasi_pubsub_name, topic=drasi_topic
+    )
 
     with caplog.at_level(logging.WARNING):
         runner.subscribe(agent)
@@ -1015,7 +1024,7 @@ async def test_drasi_trigger_defaults_to_passthrough_task(setup_deps, caplog):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_query_id(setup_deps):
+async def test_register_drasi_trigger_filters_by_query_id(setup_deps):
     """Test that the Drasi pub/sub trigger filters for events that match the provided query ID."""
     query_id = "statsquery"
     different_query_id = "differentquery"
@@ -1070,7 +1079,7 @@ async def test_drasi_trigger_filters_by_query_id(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1099,7 +1108,7 @@ async def test_drasi_trigger_filters_by_query_id(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_enum_operation(setup_deps):
+async def test_register_drasi_trigger_filters_by_enum_operation(setup_deps):
     """Test that the Drasi pub/sub trigger filters for events that match a single Drasi operation enum."""
     query_id = "calculatorquery"
     agent_pubsub_name = "testpubsub"
@@ -1153,7 +1162,7 @@ async def test_drasi_trigger_filters_by_enum_operation(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1183,7 +1192,7 @@ async def test_drasi_trigger_filters_by_enum_operation(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_string_literal_operation(setup_deps):
+async def test_register_drasi_trigger_filters_by_string_literal_operation(setup_deps):
     """Test that the Drasi pub/sub trigger filters for events that match a single Drasi operation string literal."""
     query_id = "calculatorquery"
     agent_pubsub_name = "testpubsub"
@@ -1237,7 +1246,7 @@ async def test_drasi_trigger_filters_by_string_literal_operation(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1267,7 +1276,7 @@ async def test_drasi_trigger_filters_by_string_literal_operation(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_enum_operations(setup_deps):
+async def test_register_drasi_trigger_filters_by_enum_operations(setup_deps):
     """Test that the Drasi pub/sub trigger filters for events that match a list of Drasi operation enums."""
     query_id = "babygoatquery"
     agent_pubsub_name = "testpubsub"
@@ -1343,7 +1352,7 @@ async def test_drasi_trigger_filters_by_enum_operations(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1373,7 +1382,7 @@ async def test_drasi_trigger_filters_by_enum_operations(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_string_literal_operations(setup_deps):
+async def test_register_drasi_trigger_filters_by_string_literal_operations(setup_deps):
     """Test that the Drasi pub/sub trigger filters for events that match a list of Drasi operation string literals."""
     query_id = "goatquery"
     agent_pubsub_name = "testpubsub"
@@ -1449,7 +1458,7 @@ async def test_drasi_trigger_filters_by_string_literal_operations(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1479,7 +1488,7 @@ async def test_drasi_trigger_filters_by_string_literal_operations(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_mixed_operations(setup_deps):
+async def test_register_drasi_trigger_filters_by_mixed_operations(setup_deps):
     """
     Test that the Drasi pub/sub trigger filters for events that
     match a list of Drasi operations (enums and string literals).
@@ -1556,7 +1565,7 @@ async def test_drasi_trigger_filters_by_mixed_operations(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1586,7 +1595,7 @@ async def test_drasi_trigger_filters_by_mixed_operations(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_filters_by_change_model(setup_deps):
+async def test_register_drasi_trigger_filters_by_change_model(setup_deps):
     """Test that the Drasi pub/sub trigger validates the change data in events (and implicitly filters)."""
     query_id = "nucksquery"
     agent_pubsub_name = "testpubsub"
@@ -1707,7 +1716,7 @@ async def test_drasi_trigger_filters_by_change_model(setup_deps):
     class Counter(BaseModel):
         count: int
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1737,7 +1746,9 @@ async def test_drasi_trigger_filters_by_change_model(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_ignores_events_without_change_data(setup_deps, caplog):
+async def test_register_drasi_trigger_ignores_events_without_change_data(
+    setup_deps, caplog
+):
     """Test that the Drasi pub/sub trigger ignores events that do not contain change data."""
     query_id = "phoquery"
     agent_pubsub_name = "testpubsub"
@@ -1769,7 +1780,7 @@ async def test_drasi_trigger_ignores_events_without_change_data(setup_deps, capl
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1789,7 +1800,7 @@ async def test_drasi_trigger_ignores_events_without_change_data(setup_deps, capl
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_ignores_malformed_events(setup_deps):
+async def test_register_drasi_trigger_ignores_malformed_events(setup_deps):
     """Test that the Drasi pub/sub trigger ignores events that do not conform to the expected format."""
     query_id = "boringquery"
     agent_pubsub_name = "testpubsub"
@@ -1824,7 +1835,7 @@ async def test_drasi_trigger_ignores_malformed_events(setup_deps):
         pubsub_names=[agent_pubsub_name, drasi_pubsub_name], event_stream=events
     )
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1840,7 +1851,7 @@ async def test_drasi_trigger_ignores_malformed_events(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_when_pubsub_is_missing(setup_deps):
+async def test_register_drasi_trigger_raises_when_pubsub_is_missing(setup_deps):
     """
     Test that the Drasi pub/sub trigger fails when no pub/sub component is provided
     (as an argument or on the agent).
@@ -1878,7 +1889,7 @@ async def test_drasi_trigger_raises_when_pubsub_is_missing(setup_deps):
     agent = make_agent()
     runner = make_runner(pubsub_names=[agent_pubsub_name], event_stream=events)
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         task_mapper=lambda event, msg_ctx: TriggerAction(task=f"{event.seq}"),
@@ -1889,7 +1900,7 @@ async def test_drasi_trigger_raises_when_pubsub_is_missing(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_when_pubsub_is_not_registered(setup_deps):
+async def test_register_drasi_trigger_raises_when_pubsub_is_not_registered(setup_deps):
     """Test that the Drasi pub/sub trigger fails when the given pub/sub component is not registered."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -1925,7 +1936,7 @@ async def test_drasi_trigger_raises_when_pubsub_is_not_registered(setup_deps):
     agent = make_agent(pubsub_name=agent_pubsub_name, topic=agent_topic)
     runner = make_runner(pubsub_names=[agent_pubsub_name], event_stream=events)
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1942,7 +1953,9 @@ async def test_drasi_trigger_raises_when_pubsub_is_not_registered(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_when_pubsub_matches_agent_pubsub(setup_deps):
+async def test_register_drasi_trigger_raises_when_pubsub_matches_agent_pubsub(
+    setup_deps,
+):
     """Test that the Drasi pub/sub trigger fails when the agent pub/sub component is used and pub/sub topic matches the agent's pub/sub topic."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -1978,7 +1991,7 @@ async def test_drasi_trigger_raises_when_pubsub_matches_agent_pubsub(setup_deps)
     agent = make_agent(pubsub_name=agent_pubsub_name, topic=agent_topic)
     runner = make_runner(pubsub_names=[agent_pubsub_name], event_stream=events)
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -1993,7 +2006,7 @@ async def test_drasi_trigger_raises_when_pubsub_matches_agent_pubsub(setup_deps)
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_unsupported_operation(setup_deps):
+async def test_register_drasi_trigger_raises_with_unsupported_operation(setup_deps):
     """Test that the Drasi pub/sub trigger fails when the provided operation is not supported."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -2026,7 +2039,7 @@ async def test_drasi_trigger_raises_with_unsupported_operation(setup_deps):
 
     operation = "x"
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2043,7 +2056,7 @@ async def test_drasi_trigger_raises_with_unsupported_operation(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_some_supported_operations(setup_deps):
+async def test_register_drasi_trigger_raises_with_some_supported_operations(setup_deps):
     """Test that the Drasi pub/sub trigger fails when some of the provided operations are not supported."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -2076,7 +2089,7 @@ async def test_drasi_trigger_raises_with_some_supported_operations(setup_deps):
 
     operations = [DrasiOperation.u, "x", "i", 7]
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2092,7 +2105,7 @@ async def test_drasi_trigger_raises_with_some_supported_operations(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_unsupported_change_model(setup_deps):
+async def test_register_drasi_trigger_raises_with_unsupported_change_model(setup_deps):
     """Test that the Drasi pub/sub trigger fails when the provided change model is not supported."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -2130,7 +2143,7 @@ async def test_drasi_trigger_raises_with_unsupported_change_model(setup_deps):
 
     change_model = 17
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2146,7 +2159,7 @@ async def test_drasi_trigger_raises_with_unsupported_change_model(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_async_task_mapper(setup_deps):
+async def test_register_drasi_trigger_raises_with_async_task_mapper(setup_deps):
     """Test that the Drasi pub/sub trigger fails when the provided task mapper is async."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -2185,7 +2198,7 @@ async def test_drasi_trigger_raises_with_async_task_mapper(setup_deps):
     async def async_task_mapper(event, msg_ctx):
         return TriggerAction(task=f"{event.seq}")
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2198,7 +2211,7 @@ async def test_drasi_trigger_raises_with_async_task_mapper(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_non_callable_task_mapper(setup_deps):
+async def test_register_drasi_trigger_raises_with_non_callable_task_mapper(setup_deps):
     """Test that the Drasi pub/sub trigger fails when the provided task mapper is not callable."""
     query_id = "testquery"
     agent_pubsub_name = "testpubsub"
@@ -2236,7 +2249,7 @@ async def test_drasi_trigger_raises_with_non_callable_task_mapper(setup_deps):
 
     task_mapper = "nobody will ever get this far into the test suite to read this"
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2249,7 +2262,9 @@ async def test_drasi_trigger_raises_with_non_callable_task_mapper(setup_deps):
 
 
 @pytest.mark.asyncio
-async def test_drasi_trigger_raises_with_async_callable_task_mapper(setup_deps):
+async def test_register_drasi_trigger_raises_with_async_callable_task_mapper(
+    setup_deps,
+):
     """
     Test that the Drasi pub/sub trigger fails when the provided task mapper is a callable object
     with an `async def` `__call__` method.
@@ -2292,7 +2307,7 @@ async def test_drasi_trigger_raises_with_async_callable_task_mapper(setup_deps):
         async def __call__(self, event, msg_ctx):
             return TriggerAction(task=f"{event.seq}")
 
-    drasi_trigger(
+    register_drasi_trigger(
         agent,
         query_id=query_id,
         pubsub=drasi_pubsub_name,
@@ -2302,3 +2317,164 @@ async def test_drasi_trigger_raises_with_async_callable_task_mapper(setup_deps):
 
     with _runner_raises_exception_with_cause(TypeError, match="mapper.*synchronous"):
         runner.subscribe(agent)
+
+
+def test_public_exports():
+    import dapr_agents.ext.drasi as drasi
+
+    assert set(drasi.__all__) == {
+        "register_drasi_trigger",
+        "DrasiChangeEvent",
+        "DrasiOperation",
+    }
+    assert not hasattr(drasi, "drasi_trigger")
+    assert not hasattr(drasi, "enable_drasi_subscriptions")
+
+
+def test_router_contract_dependency():
+    from drasi_agent_router_contracts import AgentDelivery, parse_catalog
+
+    assert AgentDelivery.__module__.startswith("drasi_agent_router_contracts.")
+    assert callable(parse_catalog)
+
+
+@pytest.mark.asyncio
+async def test_register_drasi_trigger_allows_multiple_queries(setup_deps):
+    query_ids = ["first-query", "second-query"]
+    pubsub = "drasipubsub"
+    events = [
+        _make_cloudevent(
+            data={
+                "op": "i",
+                "ts_ms": 123,
+                "seq": index,
+                "payload": {
+                    "source": {"queryId": query_id, "ts_ms": 123},
+                    "after": {"item": query_id},
+                },
+            },
+            id=query_id,
+            pubsubname=pubsub,
+            topic=f"drasi-events-{query_id}",
+        )
+        for index, query_id in enumerate(query_ids)
+    ]
+    make_agent, make_runner, wf_scheduler_method = setup_deps
+    agent = make_agent()
+    runner = make_runner(pubsub_names=[pubsub], event_stream=events)
+
+    for query_id in query_ids:
+        register_drasi_trigger(
+            agent,
+            query_id=query_id,
+            pubsub=pubsub,
+            task_mapper=lambda event, _: TriggerAction(
+                task=event.payload.source.queryId
+            ),
+        )
+
+    runner.subscribe(agent)
+    await _wait_for_completion()
+
+    assert wf_scheduler_method.call_count == 2
+    assert {
+        _get_attr_from_wf_input(call.kwargs, "task")
+        for call in wf_scheduler_method.call_args_list
+    } == set(query_ids)
+
+
+@pytest.mark.parametrize("first_mode", ["static", "dynamic"])
+def test_mixed_modes_are_rejected(setup_deps, caplog, first_mode: DrasiMode):
+    make_agent, _, _ = setup_deps
+    agent = make_agent()
+
+    if first_mode == "static":
+        register_drasi_trigger(agent, query_id="query")
+    else:
+        register_activation(agent, mode="dynamic", callback=lambda _: None)
+
+    with pytest.raises(DrasiModeConflictError, match="mode is already registered"):
+        if first_mode == "static":
+            register_activation(agent, mode="dynamic", callback=lambda _: None)
+        else:
+            register_drasi_trigger(agent, query_id="query")
+
+    assert len(agent._activations) == 1
+    assert agent.name in caplog.text
+    assert "mode is already registered" in caplog.text
+
+
+def test_modes_are_scoped_to_agent_instances():
+    static_agent = Mock(spec=DurableAgent)
+    dynamic_agent = Mock(spec=DurableAgent)
+    static_agent.name = "StaticAgent"
+    dynamic_agent.name = "DynamicAgent"
+
+    register_drasi_trigger(static_agent, query_id="query")
+    register_activation(dynamic_agent, mode="dynamic", callback=lambda _: None)
+
+    static_agent.add_activation.assert_called_once()
+    dynamic_agent.add_activation.assert_called_once()
+
+
+def test_failed_registration_does_not_claim_mode(setup_deps, monkeypatch):
+    make_agent, _, _ = setup_deps
+    agent = make_agent()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            agent,
+            "add_activation",
+            Mock(side_effect=RuntimeError("registration rejected")),
+        )
+        with pytest.raises(RuntimeError, match="registration rejected"):
+            register_drasi_trigger(agent, query_id="query")
+
+    register_activation(agent, mode="dynamic", callback=lambda _: None)
+    assert len(agent._activations) == 1
+
+
+def test_failed_additional_registration_keeps_mode(setup_deps, monkeypatch):
+    make_agent, _, _ = setup_deps
+    agent = make_agent()
+    register_drasi_trigger(agent, query_id="first-query")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            agent,
+            "add_activation",
+            Mock(side_effect=RuntimeError("registration rejected")),
+        )
+        with pytest.raises(RuntimeError, match="registration rejected"):
+            register_drasi_trigger(agent, query_id="second-query")
+
+    with pytest.raises(DrasiModeConflictError):
+        register_activation(agent, mode="dynamic", callback=lambda _: None)
+    assert len(agent._activations) == 1
+
+
+def test_mode_is_retained_after_shutdown(setup_deps):
+    make_agent, make_runner, _ = setup_deps
+    agent = make_agent()
+    runner = make_runner(pubsub_names=["drasipubsub"], event_stream=[])
+    register_drasi_trigger(agent, query_id="query", pubsub="drasipubsub")
+    runner.subscribe(agent)
+    runner.shutdown(agent)
+
+    with pytest.raises(DrasiModeConflictError):
+        register_activation(agent, mode="dynamic", callback=lambda _: None)
+    assert len(agent._activations) == 1
+
+
+def test_mode_is_retained_after_failed_hosting(setup_deps):
+    make_agent, make_runner, _ = setup_deps
+    agent = make_agent()
+    runner = make_runner(pubsub_names=[], event_stream=[])
+    register_drasi_trigger(agent, query_id="query")
+
+    with _runner_raises_exception_with_cause(RuntimeError, match="no pub/sub"):
+        runner.subscribe(agent)
+
+    with pytest.raises(DrasiModeConflictError):
+        register_activation(agent, mode="dynamic", callback=lambda _: None)
+    assert len(agent._activations) == 1
