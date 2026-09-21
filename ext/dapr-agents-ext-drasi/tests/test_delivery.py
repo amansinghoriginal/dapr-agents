@@ -20,7 +20,7 @@ import logging
 from collections.abc import Callable, Iterator
 from functools import partial
 from queue import Queue
-from threading import Event
+from threading import Event, Thread
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -657,7 +657,7 @@ def test_unexpected_stream_termination_is_visible_to_the_owner(
     assert all(record.exc_info is None for record in caplog.records)
 
 
-def test_response_failure_does_not_look_like_successful_consumption(
+def test_unexpected_subscription_exception_closes_the_consumer(
     config: ResolvedDrasiConfig,
     admission: Mock,
     client: MagicMock,
@@ -1040,6 +1040,114 @@ def test_native_sdk_subscription_carries_dlt_and_the_outer_ack_id(
         close()
     assert native_stream.cancelled
     client.publish_event.assert_not_called()
+
+
+def test_native_sdk_inactive_response_failure_surfaces_on_the_next_read(
+    config: ResolvedDrasiConfig,
+    admission: Mock,
+    client: MagicMock,
+    workflow: MagicMock,
+    scheduling: SchedulingInput,
+    insert_delivery: AgentDelivery,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    native_stream = _NativeStream()
+    stub = mocker.Mock()
+    stub.SubscribeTopicEventsAlpha1.return_value = native_stream
+    subscription = Subscription(
+        stub,
+        config.pubsub_name,
+        config.scope.inbox_topic,
+        dead_letter_topic=config.scope.dead_letter_topic,
+    )
+    subscription.start()
+    client.subscribe.return_value = subscription
+    threads: list[Thread] = []
+
+    def make_thread(*, target: Callable[[], None], name: str, daemon: bool) -> Thread:
+        thread = Thread(target=target, name=name, daemon=daemon)
+        threads.append(thread)
+        return thread
+
+    mocker.patch.object(delivery, "Thread", side_effect=make_thread)
+
+    def schedule(*args: object, **kwargs: object) -> str:
+        subscription.close()
+        return scheduling.instance_id
+
+    workflow.schedule_new_workflow.side_effect = schedule
+    close = subscribe_drasi_inbox(
+        config=config,
+        admission=admission,
+        dapr_client=client,
+        workflow_client=workflow,
+    )
+    native_stream.messages.put(_request(insert_delivery))
+    threads[0].join(timeout=5)
+
+    assert not threads[0].is_alive()
+    assert subscription._send_queue.empty()
+    assert "Can't send message on inactive stream" in caplog.text
+    with pytest.raises(DrasiDeliveryError, match="stream stopped unexpectedly"):
+        close()
+    assert native_stream.cancelled
+
+
+def test_native_sdk_lost_response_does_not_suppress_redelivery(
+    config: ResolvedDrasiConfig,
+    admission: Mock,
+    client: MagicMock,
+    workflow: MagicMock,
+    scheduling: SchedulingInput,
+    insert_delivery: AgentDelivery,
+    mocker: MockerFixture,
+) -> None:
+    native_stream = _NativeStream()
+    stub = mocker.Mock()
+    stub.SubscribeTopicEventsAlpha1.return_value = native_stream
+    subscription = Subscription(
+        stub,
+        config.pubsub_name,
+        config.scope.inbox_topic,
+        dead_letter_topic=config.scope.dead_letter_topic,
+    )
+    subscription.start()
+    client.subscribe.return_value = subscription
+    refused = Event()
+    original_put = subscription._send_queue.put
+
+    def put(response: api_v1.SubscribeTopicEventsRequestAlpha1) -> None:
+        if not refused.is_set():
+            refused.set()
+            raise RuntimeError("simulated response enqueue failure")
+        original_put(response)
+
+    mocker.patch.object(subscription._send_queue, "put", side_effect=put)
+    workflow.schedule_new_workflow.side_effect = (
+        scheduling.instance_id,
+        _RpcFailure(StatusCode.ALREADY_EXISTS),
+    )
+    close = subscribe_drasi_inbox(
+        config=config,
+        admission=admission,
+        dapr_client=client,
+        workflow_client=workflow,
+    )
+    try:
+        native_stream.messages.put(_request(insert_delivery))
+        assert refused.wait(timeout=5)
+        assert subscription._send_queue.empty()
+        assert workflow.schedule_new_workflow.call_count == 1
+
+        native_stream.messages.put(_request(insert_delivery))
+        response = subscription._send_queue.get(timeout=5).event_processed
+        assert response.id == "outer-publication-id"
+        assert response.status.status == appcallback_v1.TopicEventResponse.SUCCESS
+        assert workflow.schedule_new_workflow.call_count == 2
+        assert admission.admit.call_count == 2
+    finally:
+        close()
 
 
 def test_native_workflow_client_sends_the_expected_start_request(

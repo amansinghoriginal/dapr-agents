@@ -175,6 +175,7 @@ def subscribe_drasi_inbox(
                 )
                 if stopped.is_set():
                     break
+                # This SDK call queues a response, not a broker receipt confirmation.
                 subscription.respond(message, response.status)
             if not stopped.is_set():
                 logger.error("Drasi inbox stream ended unexpectedly.")
