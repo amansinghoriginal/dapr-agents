@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from importlib.resources import files
 from typing import Any
 
 import pytest
-from drasi_agent_router_contracts import AgentDelivery, to_wire
+from drasi_agent_router_contracts import AgentDelivery, parse, to_wire
 from drasi_agent_router_contracts.models.Operation import Operation
 from pytest_mock import MockerFixture
 
@@ -269,6 +270,60 @@ def test_non_json_row_values_poison_before_serialization_or_state_access(
     document["event"]["payload"]["after"]["invalid"] = value
 
     assert handler.admit(document) == Poison(reason="invalid_delivery")
+    assert handler.admit(to_wire(insert_delivery)) == Retry(reason="state_unavailable")
+
+
+@pytest.mark.parametrize("overflow", (False, True))
+def test_event_integer_encoding_limit_has_a_delivery_disposition(
+    handler: AdmissionHandler,
+    insert_delivery: AgentDelivery,
+    overflow: bool,
+) -> None:
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip("The interpreter's integer-string conversion limit is disabled.")
+    value = 10 ** (limit - 1 + int(overflow))
+    document = to_wire(insert_delivery)
+    document["event"]["payload"]["after"]["large_integer"] = value
+    parse(AgentDelivery, document)
+
+    result = handler.admit(document)
+
+    if overflow:
+        assert result == Poison(reason="invalid_delivery")
+    else:
+        assert isinstance(result, SchedulingInput)
+        event = json.loads(
+            result.task.split("BEGIN_UNTRUSTED_DRASI_EVENT_JSON\n", 1)[1].split(
+                "\n", 1
+            )[0]
+        )
+        assert event["payload"]["after"]["large_integer"] == value
+    assert sys.get_int_max_str_digits() == limit
+
+
+def test_unrenderable_event_is_poison_before_reading_intent_without_payload_logs(
+    handler: AdmissionHandler,
+    repository: InMemoryIntentRepository,
+    insert_delivery: AgentDelivery,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip("The interpreter's integer-string conversion limit is disabled.")
+    document = to_wire(insert_delivery)
+    document["event"]["payload"]["after"]["ROW_SENTINEL"] = 10**limit
+    repository.fail_next("get", "unavailable")
+    get = mocker.spy(repository, "get")
+
+    with caplog.at_level(logging.DEBUG):
+        assert handler.admit(document) == Poison(reason="invalid_delivery")
+
+    get.assert_not_called()
+    assert "invalid_delivery" in caplog.text
+    assert "SENTINEL" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
     assert handler.admit(to_wire(insert_delivery)) == Retry(reason="state_unavailable")
 
 

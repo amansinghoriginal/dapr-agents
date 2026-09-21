@@ -24,7 +24,7 @@ from pydantic import ConfigDict, JsonValue, TypeAdapter
 
 from ._interfaces import AdmissionHandler, IntentReader, IntentStoreError
 from ._models import AdmissionResult, Discard, Poison, Retry, SubscriptionScope
-from .task_builder import build_event_task
+from .task_builder import build_event_task, render_event_data
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,8 @@ class DrasiAdmissionHandler(AdmissionHandler):
             # Validate before to_wire can coerce non-JSON row values, such as NaN.
             document = _JSON_OBJECT.validate_python(data)
             delivery = parse(AgentDelivery, document)
+            # Encoding failures belong to the delivery, not the intent store.
+            render_event_data(delivery)
         except (WireValidationError, ValueError):
             logger.warning("Drasi event admission rejected: invalid_delivery.")
             return Poison(reason="invalid_delivery")
