@@ -110,6 +110,7 @@ class _Server:
         self.initialization_error: Exception | int | None = None
         self.protocol_version: str | None = None
         self.rpc_error: dict[str, Any] | None = None
+        self.required_token: str | None = None
         self.stall: str | None = None
         self.started = threading.Event()
         self.release = threading.Event()
@@ -134,6 +135,11 @@ class _Server:
         assert request.method == "POST"
         assert request.headers["accept"] == "application/json, text/event-stream"
         self.requests.append(request)
+        if (
+            self.required_token is not None
+            and request.headers.get("dapr-api-token") != self.required_token
+        ):
+            return httpx.Response(401)
         message = json.loads(request.content)
         self.messages.append(message)
         method = message["method"]
@@ -242,13 +248,19 @@ def removal(subscription: SubscribeRequest) -> UnsubscribeRequest:
     return parse(UnsubscribeRequest, document)
 
 
+@pytest.mark.parametrize("token", [None, "test-only-sidecar-token"])
 def test_complete_mcp_flow_uses_configured_sidecar_and_frozen_interface(
     client: MCPRouterClient,
     server: _Server,
     config: ResolvedDrasiConfig,
     subscription: SubscribeRequest,
     removal: UnsubscribeRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    token: str | None,
 ) -> None:
+    monkeypatch.setattr(router_client.settings, "DAPR_API_TOKEN", token)
+    server.required_token = token
     router: RouterClient = client
     catalog = router.list_queries()
     server.queue("subscribe", _success(_subscribe_response(config.scope)))
@@ -267,12 +279,47 @@ def test_complete_mcp_flow_uses_configured_sidecar_and_frozen_interface(
         {"name": "unsubscribe", "arguments": to_wire(removal)},
     ]
     assert all(str(request.url) == config.router_mcp_url for request in server.requests)
+    assert all(
+        request.headers.get("dapr-api-token") == token for request in server.requests
+    )
     assert all("instructions" not in call["arguments"] for call in server.calls)
     assert [message["method"] for message in server.messages].count("initialize") == 3
     assert [message["method"] for message in server.messages].count(
         "notifications/initialized"
     ) == 3
     assert all(http.is_closed for http in server.clients)
+    if token is not None:
+        assert token not in caplog.text
+        assert all(token not in str(request.url) for request in server.requests)
+
+
+def test_invalid_sidecar_token_is_a_transport_error_without_token_disclosure(
+    client: MCPRouterClient,
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "test-only-invalid-sidecar-token"
+    monkeypatch.setattr(router_client.settings, "DAPR_API_TOKEN", token)
+    server.required_token = "test-only-expected-sidecar-token"
+    with pytest.raises(RouterError) as failure:
+        client.list_queries()
+    assert failure.value.category == "transport"
+    assert server.calls == []
+    assert token not in caplog.text
+    assert token not in "".join(traceback.format_exception(failure.value))
+
+
+def test_loopback_requests_do_not_use_environment_proxies(
+    client: MCPRouterClient,
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(variable, "http://proxy.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+    assert client.list_queries().queries
+    assert all(http.trust_env is False for http in server.clients)
 
 
 @pytest.mark.parametrize("empty", [False, True])
@@ -606,6 +653,35 @@ def test_incompatible_mcp_version_fails_as_invalid_response(
         client.list_queries()
     assert failure.value.category == "invalid_response"
     assert server.calls == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "SDK initialization invariant failed",
+        "Unsupported protocol version in client configuration",
+    ],
+)
+def test_unexpected_initialization_runtime_errors_are_preserved(
+    client: MCPRouterClient,
+    server: _Server,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    error = RuntimeError(message)
+
+    async def broken_initialize(
+        self: router_client.ClientSession,
+    ) -> router_client.types.InitializeResult:
+        raise error
+
+    monkeypatch.setattr(router_client.ClientSession, "initialize", broken_initialize)
+    with pytest.raises(ExceptionGroup) as failure:
+        client.list_queries()
+    assert failure.value.subgroup(lambda part: part is error) is not None
+    assert failure.value.subgroup(RouterError) is None
+    assert server.calls == []
+    assert all(http.is_closed for http in server.clients)
 
 
 def test_malformed_mcp_envelope_is_an_invalid_response(

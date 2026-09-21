@@ -26,6 +26,8 @@ from typing import Any, NoReturn, TypeVar
 
 import httpx
 from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+from dapr.clients.http.conf import DAPR_API_TOKEN_HEADER
+from dapr.conf import settings
 from drasi_agent_router_contracts import (
     ListQueriesRequest,
     ListQueriesResponse,
@@ -249,9 +251,15 @@ class MCPRouterClient(RouterClient):
     async def _exchange(
         self, operation: str, arguments: dict[str, Any]
     ) -> types.CallToolResult:
+        headers: dict[str, str] = {}
+        token = settings.DAPR_API_TOKEN
+        if token is not None:
+            headers[DAPR_API_TOKEN_HEADER] = token
         async with asyncio.timeout(self._timeout_seconds):
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(self._timeout_seconds)
+                timeout=httpx.Timeout(self._timeout_seconds),
+                headers=headers,
+                trust_env=False,
             ) as http_client:
                 async with streamable_http_client(
                     self._config.router_mcp_url,
@@ -265,8 +273,12 @@ class MCPRouterClient(RouterClient):
                     ) as session:
                         try:
                             await session.initialize()
-                        except RuntimeError:
-                            # The SDK reports incompatible MCP versions this way.
+                        except RuntimeError as error:
+                            # The SDK has no typed version-negotiation exception.
+                            if not str(error).startswith(
+                                "Unsupported protocol version from the server: "
+                            ):
+                                raise
                             raise RouterError("invalid_response") from None
                         # call_tool insists on structuredContent for output schemas.
                         # Validate both documented representations ourselves instead.
