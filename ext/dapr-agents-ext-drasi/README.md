@@ -84,7 +84,7 @@ uv sync --active --group dev --group test --extra drasi
 ### Run extension tests
 
 ```bash
-uv run --group test pytest ext/dapr-agents-ext-drasi -m "not integration" -v
+uv run --group test --extra drasi pytest ext/dapr-agents-ext-drasi -m "not integration" -v
 ```
 
 ### Extension code quality

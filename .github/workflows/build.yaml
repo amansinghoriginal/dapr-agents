@@ -103,9 +103,12 @@ jobs:
     - name: Check typing
       run: |
         uv run mypy --config-file mypy.ini
-    - name: Run tests
+    - name: Run core tests
       run: |
-        uv run pytest tests ext -m "not integration"
+        uv run pytest tests -m "not integration"
+    - name: Run extension tests
+      run: |
+        uv run --extra drasi pytest ext -m "not integration"
 
   package:
     needs: lint

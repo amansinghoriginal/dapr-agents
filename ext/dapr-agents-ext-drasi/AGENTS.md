@@ -90,7 +90,7 @@ Notes:
 - `dapr_agents.ext` is a PEP 420 namespace package. Do not add an
     `__init__.py` to `dapr_agents/ext/`; that would change import behavior.
 - `register_drasi_trigger` is activation-time wiring only. It does not start the agent runtime by itself; it registers pub/sub routes on the target `DurableAgent`.
-- Multiple static query registrations on the same agent are supported. Private mode registration prevents mixing static and dynamic registrations and remains attached to the agent across shutdown or failed hosting attempts.
+- Multiple static query registrations on the same agent are supported. Static and future dynamic entry points must both use `_registration.register_activation` to prevent mixing modes in either registration order. Mode ownership remains attached to the agent across shutdown or failed hosting attempts.
 - The router contract dependency belongs to this extension and is pinned to a public Git revision. Do not copy its generated models or replace the existing unpacked static event models with router delivery models.
 - `enable_drasi_subscriptions()` is reserved for the complete dynamic implementation; do not export a placeholder.
 - The default topic is derived from the query ID as
@@ -127,7 +127,7 @@ Notes:
 - To run extension tests from the repo root:
 
     ```bash
-    uv run --group test pytest ext/dapr-agents-ext-drasi -m "not integration" -v
+    uv run --group test --extra drasi pytest ext/dapr-agents-ext-drasi -m "not integration" -v
     ```
 
 - Extension tests currently live in:
