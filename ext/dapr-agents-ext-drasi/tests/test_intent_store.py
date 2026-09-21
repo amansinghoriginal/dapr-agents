@@ -30,6 +30,8 @@ from dapr.clients import DaprClient
 from dapr.clients.exceptions import DaprGrpcError, DaprInternalError
 from dapr.clients.grpc._response import StateResponse
 from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
+from dapr.clients.retry import RetryPolicy
+from dapr.proto import api_v1
 from grpc import RpcError, StatusCode
 from pydantic import BaseModel
 
@@ -71,6 +73,15 @@ class _RpcFailure(RpcError):
 
 def _grpc_error(status: StatusCode) -> DaprGrpcError:
     return DaprGrpcError(_RpcFailure(status))
+
+
+def _native_sdk_client(stub: MagicMock, retry_policy: RetryPolicy) -> DaprClient:
+    """Keep real SDK methods and retries; replace only the gRPC transport."""
+    client = object.__new__(DaprClient)
+    client._stub = stub
+    client._channel = MagicMock()
+    client.retry_policy = retry_policy
+    return client
 
 
 @dataclass(frozen=True)
@@ -663,3 +674,127 @@ def test_programming_errors_are_not_disguised_as_storage_failures(
     backend.read_error = TypeError("broken client implementation")
     with pytest.raises(TypeError, match="broken client"):
         repository.load()
+
+
+@pytest.mark.parametrize("operation", ("initialize", "save"))
+@pytest.mark.parametrize(
+    "status", (StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXCEEDED)
+)
+def test_uncertain_writes_do_not_retry_inside_the_native_sdk(
+    scope: SubscriptionScope,
+    intent_document: IntentDocument,
+    operation: str,
+    status: StatusCode,
+) -> None:
+    persisted = (
+        api_v1.GetStateResponse(
+            data=intent_document.model_dump_json().encode(), etag="before"
+        )
+        if operation == "save"
+        else api_v1.GetStateResponse()
+    )
+    stub = MagicMock()
+    rpc_call = MagicMock()
+    rpc_call.initial_metadata.return_value = ()
+
+    def get_rpc(
+        request: api_v1.GetStateRequest, *, metadata: object
+    ) -> tuple[api_v1.GetStateResponse, MagicMock]:
+        return persisted, rpc_call
+
+    def save_rpc(request: api_v1.SaveStateRequest, *, metadata: object) -> None:
+        nonlocal persisted
+        item = request.states[0]
+        if item.HasField("etag") and item.etag.value != persisted.etag:
+            raise _RpcFailure(StatusCode.ABORTED)
+        persisted = api_v1.GetStateResponse(data=item.value, etag="committed")
+        raise _RpcFailure(status)
+
+    stub.GetState.with_call.side_effect = get_rpc
+    stub.SaveState.with_call.side_effect = save_rpc
+    configured_policy = RetryPolicy(max_attempts=2)
+    clients: list[DaprClient] = []
+
+    def factory() -> DaprClient:
+        client = _native_sdk_client(stub, configured_policy)
+        clients.append(client)
+        return client
+
+    repository = DaprIntentRepository(
+        scope=scope,
+        store=StateStoreService(
+            store_name=_STORE_NAME, key_prefix=_PREFIX, client_factory=factory
+        ),
+    )
+    intent_document.intents["service-errors"].status = "pending_unsubscribe"
+    with pytest.raises(IntentStoreError) as failure:
+        if operation == "save":
+            repository.save(intent_document, expected_etag="before")
+        else:
+            repository.initialize(intent_document)
+    assert failure.value.category == "unavailable"
+    assert stub.SaveState.with_call.call_count == 1
+    assert clients[0].retry_policy.max_attempts == 0
+    assert configured_policy.max_attempts == 2
+
+    restored = repository.load()
+    assert restored is not None
+    assert restored.document == intent_document
+    assert restored.etag == "committed"
+    assert clients[1].retry_policy is configured_policy
+    request = stub.SaveState.with_call.call_args.args[0]
+    assert request.store_name == _STORE_NAME
+    assert request.states[0].key == _key(scope)[1]
+    assert request.states[0].HasField("etag") == (operation == "save")
+    assert request.states[0].options.concurrency == Concurrency.first_write.value
+    assert request.states[0].options.consistency == Consistency.strong.value
+
+
+@pytest.mark.parametrize(
+    ("empty_payload", "etag", "error_category"),
+    (
+        (True, "", None),
+        (True, "0", "corrupt"),
+        (False, "", "unavailable"),
+        (False, "0", None),
+    ),
+)
+def test_native_sdk_missing_state_and_string_etag_semantics(
+    scope: SubscriptionScope,
+    intent_document: IntentDocument,
+    empty_payload: bool,
+    etag: str,
+    error_category: str | None,
+) -> None:
+    response = api_v1.GetStateResponse(
+        data=b"" if empty_payload else intent_document.model_dump_json().encode(),
+        etag=etag,
+    )
+    stub = MagicMock()
+    rpc_call = MagicMock()
+    rpc_call.initial_metadata.return_value = ()
+    stub.GetState.with_call.return_value = response, rpc_call
+    repository = DaprIntentRepository(
+        scope=scope,
+        store=StateStoreService(
+            store_name=_STORE_NAME,
+            client_factory=lambda: _native_sdk_client(
+                stub, RetryPolicy(max_attempts=0)
+            ),
+        ),
+    )
+
+    if error_category is not None:
+        with pytest.raises(IntentStoreError) as failure:
+            repository.load()
+        assert failure.value.category == error_category
+    else:
+        snapshot = repository.load()
+        if empty_payload:
+            assert response.etag == ""
+            assert snapshot is None
+        else:
+            assert snapshot is not None
+            assert snapshot.document == intent_document
+            assert snapshot.etag == "0"
+    stub.SaveState.with_call.assert_not_called()

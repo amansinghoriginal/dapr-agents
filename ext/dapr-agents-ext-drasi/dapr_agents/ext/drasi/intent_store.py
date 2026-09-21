@@ -21,6 +21,7 @@ from typing import Literal, NoReturn
 
 from dapr.clients.exceptions import DaprGrpcError, DaprInternalError
 from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
+from dapr.clients.retry import RetryPolicy
 from grpc import RpcError, StatusCode
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -68,6 +69,7 @@ class DaprIntentRepository(IntentRepository):
         except (RpcError, DaprInternalError, OSError):
             self._fail("load", "unavailable")
 
+        # The SDK represents not-found with empty bytes and etag="", not None.
         if not response.data:
             if response.etag:
                 self._fail("load", "corrupt")
@@ -133,16 +135,21 @@ class DaprIntentRepository(IntentRepository):
         self._decode(value, operation=operation)
 
         try:
-            self._service._store().save_state(
-                self._key,
-                value,
-                etag=expected_etag,
-                state_metadata=self._metadata.copy(),
-                state_options=StateOptions(
-                    concurrency=Concurrency.first_write,
-                    consistency=Consistency.strong,
-                ),
-            )
+            store = self._service._store()
+            # The raw wrapper has no per-call SDK retry override.
+            with store._build_client() as client:
+                client.retry_policy = RetryPolicy(max_attempts=0)
+                client.save_state(
+                    store_name=store.store_name,
+                    key=self._key,
+                    value=value,
+                    etag=expected_etag,
+                    state_metadata=self._metadata.copy(),
+                    options=StateOptions(
+                        concurrency=Concurrency.first_write,
+                        consistency=Consistency.strong,
+                    ),
+                )
         except DaprGrpcError as error:
             if expected_etag is not None and error.code() == StatusCode.ABORTED:
                 self._fail(operation, "conflict")
