@@ -143,6 +143,16 @@ Statuses are `pending_subscribe`, `pending_update`, `active`, `pending_unsubscri
 
 Startup reasserts active/pending subscriptions, completes pending unsubscriptions even when a query has left the catalog, and otherwise marks removed queries unavailable while retaining their historical metadata. Query reappearance does not automatically revive unavailable intent. Ordinary shutdown does not unsubscribe. The models validate data shapes; S2, not these models or the fakes, implements transition ordering and same-query serialization.
 
+#### Durable intent storage
+
+The private `intent_store.DaprIntentRepository(scope=..., store=...)` implements the repository boundary using the agent's configured `AgentStateConfig.store` (also exposed as `agent.state_store`). It borrows the existing raw Dapr state primitive and its configured factory, retaining the service's key prefix without applying its optional workflow model, local mirroring, or blanket retries. It does not change or close the configured service.
+
+The storage key is `<service key prefix>drasi:intent:<scope.inbox_topic>`. The shared inbox identity includes the router, subscriber namespace, application, and exact agent name; queries live inside that document. Reads also validate the embedded scope. The format version remains in the document so an unsupported version cannot be mistaken for a new, absent key. The component must support ETags; existing data without a usable ETag fails as unavailable. Reads always consult storage and return detached snapshots, including pending and retired-query intent.
+
+Initialization is unconditional and restricted by the caller to exclusive preparation. Subsequent saves pass the expected document ETag with first-write-wins and strong write consistency. A gRPC `ABORTED` conditional save is a conflict; other transport failures are unavailable, and may follow a committed write. The adapter does not retry or repair writes: callers reload after success or uncertain failure and merge against fresh state after conflicts. It adds no TTL, automatic deletion, router calls, or catalog filtering.
+
+Malformed JSON, invalid records, mismatched scope, and missing or incorrectly typed versions fail as corrupt; an unsupported integer format version fails separately. Error messages and logs contain safe categories rather than backend responses or stored instructions. S1 coverage is in `tests/test_intent_store.py` and exercises the real state wrappers with an injected SDK boundary.
+
 #### Snapshot and admission boundaries
 
 Return values are detached caller-owned snapshots. Components deep-copy models they return and inputs they retain; callers may modify their own copies without changing stored or prepared state. The configuration's immutable scalar identity is separate from these mutable owned snapshots. There is no second recursively immutable copy of the router model hierarchy.
