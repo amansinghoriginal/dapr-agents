@@ -517,6 +517,13 @@ def test_classified_failures_remain_readable_errors(
             assert "may have taken effect" in result.content[0].text
         else:
             assert "may have taken effect" not in result.content[0].text
+    if isinstance(error, IntentStoreError):
+        if command == "list":
+            assert "read failed" in result.content[0].text
+            assert "Retry listing after storage recovery" in result.content[0].text
+            assert "rolled back" not in result.content[0].text
+        else:
+            assert "an attempted change was rolled back" in result.content[0].text
 
 
 def test_failure_diagnostics_do_not_echo_instructions_or_exception_payload(

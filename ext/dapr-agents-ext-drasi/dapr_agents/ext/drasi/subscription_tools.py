@@ -139,11 +139,17 @@ def _command_failure(
             )
     else:
         source = "intent_store"
-        detail = (
-            f"Local subscription state operation failed ({error.category}). "
-            "Inspect local status after storage recovery; do not assume that "
-            "an attempted change was rolled back."
-        )
+        if command == "list":
+            detail = (
+                f"Local subscription state read failed ({error.category}). "
+                "Retry listing after storage recovery."
+            )
+        else:
+            detail = (
+                f"Local subscription state operation failed ({error.category}). "
+                "Inspect local status after storage recovery; do not assume that "
+                "an attempted change was rolled back."
+            )
     logger.error(
         "Drasi subscription %s failed (source=%s, category=%s).",
         command,
