@@ -31,24 +31,28 @@ This extension is installed as an optional dependency on the core `dapr-agents` 
 uv add dapr-agents[drasi]
 ```
 
+Installing this source version requires Git and access to the public Drasi Platform repository. The extension pins the [shared router contract package](https://github.com/drasi-project/drasi-platform/tree/49e8df694a16520519a1ba559f99c1a13a668431/typespec/dapr-agent-router/python) to an immutable revision; a local Platform checkout and schema-generation tools are not required. This dependency is not installed by the core framework unless the Drasi extension is selected.
+
 ### Public API
 
 ```python
 from dapr_agents.ext.drasi import (
-    drasi_trigger,                  # Register Drasi query subscriptions for agents
+    register_drasi_trigger,         # Register author-configured Drasi query triggers
     DrasiChangeEvent,               # Type for Drasi change events
     DrasiOperation,                 # Operation type for Drasi change events
 )
 ```
 
+`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias. It preserves the existing unpacked change-event format and task-mapping behavior. The future agent-managed entry point, `enable_drasi_subscriptions()`, is not yet exported.
+
 ### Usage
 
-Register a Drasi query subscription on an agent before hosting:
+Register a Drasi query subscription on an agent before hosting. Call the helper several times to register different fixed queries on the same agent. Static triggers and agent-managed subscriptions cannot be combined on one agent.
 
 ```python
 agent = DurableAgent(...)
 
-drasi_trigger(
+register_drasi_trigger(
     agent,
     query_id="<YOUR_DRASI_QUERY_ID>",
     task_mapper=lambda event, ctx: TriggerAction(task="<AGENT_TASK_MESSAGE>")

@@ -130,7 +130,11 @@ jobs:
         uv build --package dapr-agents-ext-drasi --wheel --out-dir dist/drasi
     - name: Verify Drasi extension wheel
       run: |
-        uv pip install --target .wheel-test --no-deps dist/core/*.whl dist/drasi/*.whl
+        uv export --frozen --package dapr-agents-ext-drasi --no-dev --no-emit-workspace \
+          --no-hashes --output-file dist/drasi-requirements.txt --quiet
+        uv venv .wheel-test
+        uv pip install --python .wheel-test/bin/python --no-deps \
+          -r dist/drasi-requirements.txt dist/core/*.whl dist/drasi/*.whl
         cd /tmp
-        PYTHONPATH="$GITHUB_WORKSPACE/.wheel-test" "$GITHUB_WORKSPACE/.venv/bin/python" \
-          -c "from dapr_agents.ext.drasi import DrasiChangeEvent, DrasiOperation, drasi_trigger"
+        "$GITHUB_WORKSPACE/.wheel-test/bin/python" -I \
+          -c "from dapr_agents.ext.drasi import DrasiChangeEvent, DrasiOperation, register_drasi_trigger; from drasi_agent_router_contracts import AgentDelivery, parse_catalog"

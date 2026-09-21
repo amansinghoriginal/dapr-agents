@@ -17,6 +17,10 @@
 
 FROM python:3.13-slim-bookworm AS build
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists
+
 # Copy uv binary from distroless image
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 
