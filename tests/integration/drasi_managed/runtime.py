@@ -130,6 +130,7 @@ class Runtime:
         self.router_dapr = ""
         self.model_url = ""
         self.info: dict[str, Any] = {}
+        self._started = False
 
     def compose(self, *arguments: str, timeout: int = 180) -> str:
         return command(
@@ -170,6 +171,7 @@ class Runtime:
         self.model_url = self.url("model", 8001)
         self.info = self.request("GET", f"{self.agent_url}/ready")
         self.record_versions()
+        self._started = True
 
     def record_versions(self) -> None:
         containers = self.compose("ps", "--all", "--quiet").splitlines()
@@ -210,7 +212,7 @@ class Runtime:
     def capture(self) -> None:
         logs = self.compose("logs", "--no-color", "--timestamps", timeout=30)
         (self.directory / "containers.log").write_text(logs + "\n", encoding="utf-8")
-        if self.agent_url:
+        if self._started:
             (self.directory / "artifacts.json").write_text(
                 json.dumps(
                     {

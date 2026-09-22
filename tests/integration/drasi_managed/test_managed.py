@@ -412,7 +412,9 @@ def test_duplicate_after_terminal_is_not_locally_suppressed(runtime: Runtime) ->
         lambda: runtime.request("GET", workflow_url)["created_at"] != created_at,
         "new native workflow execution after terminal ID reuse",
     )
-    runtime.completed()
+    runtime.completed(2)
+    records = runtime.evidence()["records"]
+    assert records[0] == records[1]
 
 
 def test_duplicate_active_workflow_is_acknowledged(runtime: Runtime) -> None:
@@ -426,7 +428,16 @@ def test_duplicate_active_workflow_is_acknowledged(runtime: Runtime) -> None:
     workflow_url = f"{runtime.agent_url}/workflows/{accepted[0]['instance_id']}"
     original = runtime.request("GET", workflow_url)
     assert original["status"] == "RUNNING"
+    before_replay = len(runtime.scheduling())
     runtime.wait_consumed(runtime.publish_delivery(event_data(event)))
+    attempts = runtime.scheduling()[before_replay:]
+    assert any(event["phase"] == "entered" for event in attempts)
+    assert any(
+        event["phase"] == "failed" and event.get("status_code") == "ALREADY_EXISTS"
+        for event in attempts
+    )
+    assert not any(event["phase"] == "accepted" for event in attempts)
+    assert all(event["instance_id"] == accepted[0]["instance_id"] for event in attempts)
     current = runtime.request("GET", workflow_url)
     assert current["status"] == "RUNNING"
     assert current["created_at"] == original["created_at"]

@@ -184,6 +184,7 @@ services:
       OTEL_SDK_DISABLED: "true"
     depends_on:
       agent-dapr:
+        # DaprClient waits for /healthz/outbound before the metadata RPC.
         condition: service_started
       router:
         condition: service_healthy

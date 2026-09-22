@@ -30,7 +30,7 @@ import httpx
 from dapr.ext.workflow import DaprWorkflowClient
 from drasi_agent_router_contracts import to_wire
 from fastapi import FastAPI, HTTPException
-from grpc import RpcError
+from grpc import Call, RpcError, StatusCode
 from pydantic import BaseModel, ConfigDict
 
 from dapr_agents import AgentRunner, AgentTool, DurableAgent, OpenAIChatClient
@@ -86,9 +86,18 @@ class SchedulingProbe(DaprWorkflowClient):
             else:
                 self._gate.set()
 
-    def _record(self, phase: str, instance_id: str | None) -> None:
+    def _record(
+        self,
+        phase: str,
+        instance_id: str | None,
+        *,
+        status_code: StatusCode | None = None,
+    ) -> None:
+        event: dict[str, Any] = {"phase": phase, "instance_id": instance_id}
+        if status_code is not None:
+            event["status_code"] = status_code.name
         with self._lock:
-            self.events.append({"phase": phase, "instance_id": instance_id})
+            self.events.append(event)
 
     def schedule_new_workflow(self, *args: Any, **kwargs: Any) -> str:
         self._record("entered", kwargs.get("instance_id"))
@@ -103,8 +112,9 @@ class SchedulingProbe(DaprWorkflowClient):
         )
         try:
             instance_id = schedule(*args, **kwargs)
-        except RpcError:
-            self._record("failed", kwargs.get("instance_id"))
+        except RpcError as error:
+            status_code = error.code() if isinstance(error, Call) else None
+            self._record("failed", kwargs.get("instance_id"), status_code=status_code)
             raise
         self._record("accepted", instance_id)
         return instance_id

@@ -76,11 +76,13 @@ def completion(request: ChatRequest) -> dict[str, Any]:
     if not required.issubset(names):
         raise HTTPException(422, "Ordinary or Drasi tools are missing.")
     tasks = [
-        message["content"] for message in request.messages if message["role"] == "user"
+        (index, message["content"])
+        for index, message in enumerate(request.messages)
+        if message["role"] == "user"
     ]
-    if not tasks or not isinstance(tasks[-1], str):
+    if not tasks or not isinstance(tasks[-1][1], str):
         raise HTTPException(422, "Expected a self-contained text task.")
-    task = tasks[-1]
+    turn_start, task = tasks[-1]
     with _lock:
         _calls.append({"task": task, "tools": names})
     if not _gate.wait(timeout=60):
@@ -88,7 +90,7 @@ def completion(request: ChatRequest) -> dict[str, Any]:
 
     called = {
         call["function"]["name"]
-        for message in request.messages
+        for message in request.messages[turn_start + 1 :]
         for call in message.get("tool_calls") or []
     }
     message: dict[str, Any] = {"role": "assistant", "content": "Recorded."}

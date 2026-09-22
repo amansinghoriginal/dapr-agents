@@ -49,7 +49,9 @@ def pytest_collection_modifyitems(
 ) -> None:
     if not config.getoption("--run-drasi-managed"):
         for item in items:
-            if Path(item.path).is_relative_to(HERE):
+            if Path(item.path).is_relative_to(HERE) and item.get_closest_marker(
+                "integration"
+            ):
                 item.add_marker(pytest.mark.skip(reason="Use --run-drasi-managed."))
 
 

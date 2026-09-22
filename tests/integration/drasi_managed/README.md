@@ -34,11 +34,21 @@ uv run --frozen --no-sync --extra drasi pytest \
   -o log_cli_level=WARNING
 ```
 
-Run one scenario by appending `-k catalog_tools`, `-k interrupted`, or another pytest selector. Without `--run-drasi-managed`, these tests skip. They also carry the existing `integration` marker.
+Run one scenario by appending `-k catalog_tools`, `-k interrupted`, or another pytest selector. The real-runtime scenarios carry the existing `integration` marker and skip without `--run-drasi-managed`.
 
-**Run this suite in its own pytest process with `--confcutdir`.** Core `tests/conftest.py` replaces SDK modules globally, and the shared integration fixtures can initialize or reuse developer-wide Dapr resources. Neither is appropriate here. An explicitly requested run fails rather than skips if Docker, image builds, or a runtime dependency is unavailable.
+**Run real-runtime scenarios in their own pytest process with `--confcutdir`.** Core `tests/conftest.py` replaces SDK modules globally, and the shared integration fixtures can initialize or reuse developer-wide Dapr resources. Neither is appropriate here. An explicitly requested run fails rather than skips if Docker, image builds, or a runtime dependency is unavailable.
+
+`test_harness.py` contains offline regressions for partial startup, artifact capture, and the scripted model's current-turn behavior. These tests use controlled boundaries, require no Docker, and run in the normal core unit suite. Run them alone with:
+
+```sh
+uv run --frozen --no-sync pytest \
+  --confcutdir=tests/integration/drasi_managed \
+  tests/integration/drasi_managed/test_harness.py
+```
 
 Images build once per pytest session. Each case then creates a fresh, randomly named Compose project, a private bridge network, temporary query files, and project-owned state volumes. Every published port binds to an ephemeral loopback port. The agent, router, and broker never adopt an existing container or application state.
+
+The pinned Dapr SDK waits for `/v1.0/healthz/outbound` during `DaprClient` construction, before the agent's metadata RPC. The host uses this existing readiness gate rather than adding a second startup retry loop.
 
 Compose is invoked with an empty environment file, and the agent build has an explicit file allowlist that excludes `.env`, `.env.*`, virtual environments, and Git metadata. The repository's Azure/model configuration is not loaded or copied into either application.
 
@@ -64,7 +74,7 @@ Each case retains these files in its pytest temporary directory:
 | `containers.log` | Router, agent, sidecar, broker, placement, and scheduler logs |
 | `artifacts.json` | Scheduling observations, model/tool evidence, and inbox/DLT CloudEvents |
 
-Logs are also captured when startup fails; later artifacts require a successfully started application. Pytest reports its temporary directory with normal verbose output. To choose an artifact location, use a **new, dedicated** `--basetemp` directory: pytest replaces an existing directory supplied through that option.
+Logs are also captured when startup fails; full artifacts are collected only after endpoint discovery, application readiness, and version recording all complete. Pytest reports its temporary directory with normal verbose output. To choose an artifact location, use a **new, dedicated** `--basetemp` directory: pytest replaces an existing directory supplied through that option.
 
 ## Scenarios
 
@@ -81,10 +91,12 @@ Logs are also captured when startup fails; later artifacts require a successfull
 | Intent failures | Invalid persisted intent and an actual store outage request retry, not success/absence |
 | Scheduler failure | A real SDK client connects to a reserved, non-listening local port; restoring the normal client allows retry |
 | Poison input and retry exhaustion | Original data reaches the configured DLT; poison never invokes the model |
-| Active/terminal duplicates | Active execution is not replaced; a terminal ID can be scheduled again without application-local suppression |
+| Active/terminal duplicates | Replay reaches the native scheduler and gets `ALREADY_EXISTS` while active; terminal ID reuse starts a new execution and repeats the ordinary action |
 | Mode exclusion and tools | Both static/dynamic registration orders reject mixing; ordinary tools and all generated tools remain available in event workflows |
 
 The only scheduling instrumentation is a `DaprWorkflowClient` subclass that records calls, optionally holds a call before acceptance, or selects the deliberately unreachable real client. Successful calls always delegate to the native scheduler. There are no fabricated workflow IDs, fake state clients, mocked router responses, or synthetic broker acknowledgements.
+
+The scripted model considers tool calls only after the latest user message. Previous completed turns in a reused workflow ID's history cannot suppress the new task's scripted actions. Repeated receiver records demonstrate possible duplicate execution, not an idempotent business action.
 
 For retirement/admission checks, a test changes only its temporary startup catalog or its own scoped intent document through Dapr's state API. CAS and strong reads remain enabled. Restart recovery uses fresh application processes, not reuse of a stopped registration.
 
