@@ -1,0 +1,30 @@
+#
+# Copyright 2026 The Dapr Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+apiVersion: v1
+kind: Reaction
+name: sre-router
+spec:
+  kind: DaprAgentRouter
+  properties:
+    routerId: drasi-system/sre-router-reaction
+    egressPubsubName: agent-egress
+  queries:
+    checkout-server-errors: |
+      title: Checkout server errors
+      description: Individual checkout HTTP 5xx error records with errorId, service, statusCode, message, rolloutId, and marker. Each row is one observation, not an aggregate.
+      usage: Monitor entering rows (i) for newly matching errors. Changed diagnostics are updates (u); a resolved or removed matching error leaves the result (d). rolloutId can identify a rollout worth following.
+    checkout-rollout-status: |
+      title: Checkout rollout status
+      description: Individual checkout rollout records with rolloutId, service, status, message, and marker. Status is progressing, healthy, or failed. Each row is one rollout, not an aggregate.
+      usage: Monitor updates (u) to follow an existing rollout's progress. Entering rows (i) are newly observed rollouts. Subscribing does not return a current snapshot or historical changes.

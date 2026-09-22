@@ -1,0 +1,67 @@
+#
+# Copyright 2026 The Dapr Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+[project]
+name = "ext-drasi-agent-managed-subscriptions-k8s"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dapr-agents[drasi]",
+    "httpx==0.28.1",
+    "psycopg[binary]==3.2.10",
+    "python-dotenv==1.2.1",
+    "pyyaml==6.0.3",
+    "redis==5.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "flake8>=7.3.0",
+    "mypy>=1.15.0",
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.14.11",
+    "types-PyYAML>=6.0.12",
+]
+
+[tool.uv]
+package = false
+
+# Match the integration trunk's SDK compatibility window until I4 integration.
+[tool.uv.exclude-newer-package]
+dapr = "2026-05-21T00:00:00Z"
+dapr-ext-fastapi = "2026-05-21T00:00:00Z"
+dapr-ext-workflow = "2026-05-21T00:00:00Z"
+durabletask-dapr = "2026-05-21T00:00:00Z"
+anthropic = "2026-08-23T00:00:00Z"
+
+# I4 owns registration in the repository-wide workspace.
+[tool.uv.workspace]
+members = []
+
+[tool.uv.sources]
+dapr-agents = { path = "../..", editable = true }
+dapr-agents-ext-drasi = { path = "../../ext/dapr-agents-ext-drasi", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: uses an explicitly configured PostgreSQL instance",
+]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+disallow_untyped_defs = true
+follow_imports = "skip"
+ignore_missing_imports = true
