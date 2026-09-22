@@ -218,6 +218,37 @@ class TestAgentToolExecutorRegisterTool:
         assert tool3 in tools
 
 
+class TestAgentToolExecutorUnregisterTool:
+    def test_removes_only_the_owned_registration(self):
+        ordinary = AgentTool(name="ordinary", description="Existing action.", func=None)
+        generated = AgentTool(
+            name="generated", description="Generated action.", func=None
+        )
+        executor = AgentToolExecutor(tools=[ordinary])
+        executor.register_tool(generated)
+
+        executor.unregister_tool(generated)
+
+        assert executor.list_tools() == [ordinary]
+        executor.register_tool(generated)
+        assert executor.get_tool("GENERATED") is generated
+
+    def test_does_not_remove_a_same_name_replacement(self):
+        registered = AgentTool(name="my_tool", description="Current action.", func=None)
+        other = AgentTool(name="MY TOOL", description="Another action.", func=None)
+        executor = AgentToolExecutor(tools=[registered])
+
+        with pytest.raises(AgentToolExecutorError, match="supplied instance"):
+            executor.unregister_tool(other)
+
+        assert executor.list_tools() == [registered]
+
+    def test_missing_registration_is_an_explicit_error(self):
+        tool = AgentTool(name="missing", description="Missing action.", func=None)
+        with pytest.raises(AgentToolExecutorError, match="supplied instance"):
+            AgentToolExecutor().unregister_tool(tool)
+
+
 class TestAgentToolExecutorRunTool:
     """Test suite for AgentToolExecutor.run_tool() method."""
 

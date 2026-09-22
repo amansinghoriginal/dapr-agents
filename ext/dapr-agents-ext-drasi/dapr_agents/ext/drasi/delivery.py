@@ -143,7 +143,6 @@ def subscribe_drasi_inbox(
 
     stopped = Event()
     close_lock = Lock()
-    failure: DrasiDeliveryError | None = None
 
     def close_subscription() -> None:
         # An in-flight SDK reconnect can replace a stream after a close request.
@@ -160,7 +159,6 @@ def subscribe_drasi_inbox(
                 ) from None
 
     def consume() -> None:
-        nonlocal failure
         try:
             for message in subscription:
                 if stopped.is_set():
@@ -179,23 +177,16 @@ def subscribe_drasi_inbox(
                 subscription.respond(message, response.status)
             if not stopped.is_set():
                 logger.error("Drasi inbox stream ended unexpectedly.")
-                failure = DrasiDeliveryError(
-                    "The Drasi inbox stream ended unexpectedly."
-                )
         except (StreamCancelledError, StreamInactiveError) as error:
             if not stopped.is_set():
                 logger.error("Drasi inbox stream stopped (%s).", type(error).__name__)
-                failure = DrasiDeliveryError(
-                    "The Drasi inbox stream stopped unexpectedly."
-                )
         except Exception as error:
             logger.error("Drasi inbox consumer failed (%s).", type(error).__name__)
-            failure = DrasiDeliveryError("The Drasi inbox consumer failed.")
         finally:
             try:
                 close_subscription()
-            except DrasiDeliveryError as error:
-                failure = error
+            except DrasiDeliveryError:
+                logger.error("Drasi consumer exited without confirmed stream cleanup.")
 
     try:
         thread = Thread(target=consume, name="drasi-inbox", daemon=True)
@@ -218,7 +209,5 @@ def subscribe_drasi_inbox(
                 "Drasi inbox consumer did not stop before its shutdown deadline."
             )
             raise DrasiDeliveryError("The Drasi inbox consumer did not stop in time.")
-        if failure is not None:
-            raise failure from None
 
     return close

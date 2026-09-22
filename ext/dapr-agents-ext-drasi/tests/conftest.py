@@ -44,6 +44,13 @@ from dapr_agents.ext.drasi._models import (  # noqa: E402
 _CURRENT_INCARNATION = "incarnation-service-errors"
 
 
+@pytest.fixture(autouse=True)
+def isolated_application_owners(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dapr_agents.ext.drasi import _registration
+
+    monkeypatch.setattr(_registration, "_APPLICATION_OWNERS", {})
+
+
 def _published_messages() -> dict[str, dict[str, object]]:
     resource = files("drasi_agent_router_contracts").joinpath(
         "fixtures", "messages.json"

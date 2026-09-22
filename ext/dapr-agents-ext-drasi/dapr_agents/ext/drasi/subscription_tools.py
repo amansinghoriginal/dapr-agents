@@ -126,7 +126,9 @@ def _command_failure(
             ),
             "unavailable": (
                 "The subscription is unavailable. Inspect local subscription "
-                "status and the operator's configuration."
+                "status. If retained intent is marked unavailable, unsubscribe "
+                "first, then subscribe again. Otherwise check preparation and "
+                "the operator's configuration."
             ),
         }[error.category]
     elif isinstance(error, RouterError):

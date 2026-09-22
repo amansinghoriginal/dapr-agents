@@ -22,6 +22,7 @@ from typing import Literal, NoReturn
 from dapr.clients.exceptions import DaprGrpcError, DaprInternalError
 from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
 from dapr.clients.retry import RetryPolicy
+from dapr.proto import api_v1
 from grpc import RpcError, StatusCode
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -62,10 +63,19 @@ class DaprIntentRepository(IntentRepository):
 
     def load(self) -> IntentSnapshot | None:
         try:
-            # Borrow the configured primitive, not its workflow codec or retries.
-            response = self._service._store().get_state(
-                self._key, state_metadata=self._metadata.copy()
-            )
+            store = self._service._store()
+            with store._build_client() as client:
+                # The SDK's get_state wrapper does not expose read consistency.
+                # Keep its configured channel and read retry policy.
+                request = api_v1.GetStateRequest(
+                    store_name=store.store_name,
+                    key=self._key,
+                    metadata=self._metadata.copy(),
+                    consistency=Consistency.strong.value,
+                )
+                response, _ = client.retry_policy.run_rpc(
+                    client._stub.GetState.with_call, request, metadata=None
+                )
         except (RpcError, DaprInternalError, OSError):
             self._fail("load", "unavailable")
 

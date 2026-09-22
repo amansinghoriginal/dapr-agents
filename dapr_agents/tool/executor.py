@@ -84,6 +84,18 @@ class AgentToolExecutor(BaseModel):
         else:
             raise TypeError(f"Unsupported tool type: {type(tool).__name__}")
 
+    def unregister_tool(self, tool: AgentTool) -> None:
+        """Remove an owned registration without removing a same-name replacement."""
+        key = self._normalize(tool.name)
+        if self._tools_map.get(key) is not tool:
+            logger.error(
+                "Cannot unregister tool '%s': registration changed.", tool.name
+            )
+            raise AgentToolExecutorError(
+                f"Tool '{tool.name}' is not registered as the supplied instance."
+            )
+        del self._tools_map[key]
+
     def get_tool(self, tool_name: str) -> Optional[AgentTool]:
         """
         Retrieves a tool by name (case-insensitive, spaces/underscores ignored).
