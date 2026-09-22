@@ -1619,6 +1619,13 @@ class AgentRunner(WorkflowRunner):
             except Exception:
                 logger.exception("Error stopping prepared agent during attach rollback")
             started_here = False
+        if agent.pre_start_activations and agent.is_started:
+            # Startup/rollback could not confirm that the worker stopped.
+            # Keep its tools, clients and ownership until shutdown succeeds.
+            with self._lock:
+                self._activation_closers[id(agent)] = collected
+                self._activation_close_failures.add(id(agent))
+            return
         failed_closers = self._rollback_activation_closers(collected)
         with self._lock:
             if failed_closers:
@@ -1709,17 +1716,23 @@ class AgentRunner(WorkflowRunner):
             # self-locking _close_activations cannot deadlock.
             with self._lock:
                 managed = agent in self._managed_agents
-                if managed:
-                    self._managed_agents.remove(agent)
-                last = len(self._managed_agents) == 0
             if managed:
+                try:
+                    agent.stop()
+                except Exception:
+                    with self._lock:
+                        self._activation_close_failures.add(id(agent))
+                    raise
                 try:
                     if agent.instrumentor is not None:
                         agent.instrumentor.uninstrument()
                 except AttributeError:
                     # this happens if the agent has no instrumentor
                     pass
-                agent.stop()  # This is safe as they'll return None if not started
+                with self._lock:
+                    self._managed_agents.remove(agent)
+            with self._lock:
+                last = len(self._managed_agents) == 0
             self._close_activations(agent)
             if last:
                 try:
@@ -1730,22 +1743,20 @@ class AgentRunner(WorkflowRunner):
                         self._close_wf_client()
                         self._close_dapr_client()
             return
-        stopped_prepared: set[int] = set()
+        with self._lock:
+            agents = list(self._managed_agents)
+        for managed in agents:
+            if managed.pre_start_activations:
+                try:
+                    managed.stop()
+                except Exception:
+                    with self._lock:
+                        self._activation_close_failures.add(id(managed))
+                    raise
         try:
-            with self._lock:
-                prepared_agents = [
-                    managed
-                    for managed in self._managed_agents
-                    if managed.pre_start_activations
-                ]
-            for prepared in prepared_agents:
-                prepared.stop()
-                stopped_prepared.add(id(prepared))
             self.unwire_pubsub()
             self._close_activations()
         finally:
-            with self._lock:
-                agents = list(self._managed_agents)
             for ag in agents:
                 try:
                     if ag.instrumentor is not None:
@@ -1753,7 +1764,7 @@ class AgentRunner(WorkflowRunner):
                 except AttributeError:
                     # this happens if the agent has no instrumentor
                     pass
-                if id(ag) not in stopped_prepared:
+                if not ag.pre_start_activations:
                     ag.stop()
             if not self._activation_closers:
                 self._close_wf_client()

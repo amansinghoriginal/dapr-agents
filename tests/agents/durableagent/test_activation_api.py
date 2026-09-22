@@ -121,7 +121,7 @@ def test_add_activation_after_hosting_window_closed_raises(agent):
     # The runner closes this window on first attach; simulate that here.
     agent._activation_window_open = False
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=r"run_stream\(\)"):
         agent.add_activation(lambda ctx: None)
 
 
@@ -147,6 +147,12 @@ def test_pre_start_registration_rejects_a_closed_window(agent):
     agent._activation_window_open = False
     with pytest.raises(RuntimeError, match="has been hosted"):
         agent.add_activation(lambda ctx: None, before_start=True)
+
+
+def test_prepared_agent_cannot_start_without_the_runner_preparation_boundary(agent):
+    agent.add_activation(lambda ctx: None, before_start=True)
+    with pytest.raises(RuntimeError, match="host it through AgentRunner"):
+        agent.start()
 
 
 def test_start_prepares_after_configuration_and_registration_before_worker(
@@ -231,3 +237,22 @@ def test_preparation_rejects_borrowed_runtime_before_registering_workflows(
     prepare.assert_not_called()
     borrowed.start.assert_not_called()
     borrowed.shutdown.assert_not_called()
+
+
+def test_prepared_stop_does_not_claim_a_failed_shutdown_succeeded(agent, monkeypatch):
+    runtime = Mock()
+    monkeypatch.setattr(agent, "_runtime", runtime)
+    monkeypatch.setattr(AgentBase, "start", Mock())
+    monkeypatch.setattr(AgentBase, "stop", Mock())
+    monkeypatch.setattr(agent, "_restore_pending_approvals", Mock())
+    monkeypatch.setattr(agent, "register_workflows", Mock())
+    agent.start(prepare=Mock())
+    runtime.shutdown.side_effect = RuntimeError("shutdown failed")
+
+    with pytest.raises(RuntimeError, match="shutdown failed"):
+        agent.stop()
+
+    assert agent.is_started
+    runtime.shutdown.side_effect = None
+    agent.stop()
+    assert not agent.is_started

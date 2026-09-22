@@ -14,10 +14,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from threading import Lock
 from typing import Callable, Literal, TypeAlias
-from weakref import ReferenceType, ref
 
 from dapr_agents.agents.durable import DurableAgent
 from dapr_agents.types.activation import ActivationCallback, ActivationContext
@@ -30,13 +28,7 @@ _MODE_ATTRIBUTE = "_dapr_agents_ext_drasi_mode"
 _MODE_LOCK = Lock()
 
 
-@dataclass
-class _ApplicationOwner:
-    agent: ReferenceType[DurableAgent]
-    registrations: int = 0
-
-
-_APPLICATION_OWNERS: dict[str, _ApplicationOwner] = {}
+_APPLICATION_OWNERS: dict[str, DurableAgent] = {}
 
 
 class DrasiModeConflictError(ValueError):
@@ -47,70 +39,42 @@ class DrasiApplicationConflictError(ValueError):
     """Another local Drasi agent is already hosted for this Dapr application."""
 
 
-def _claim_application(agent: DurableAgent) -> Callable[[], None]:
+def _claim_application(agent: DurableAgent) -> None:
     app_id = agent.appid
     if not isinstance(app_id, str) or not app_id:
         # Static registrations predate an application-identity requirement.
-        return lambda: None
+        return
 
     with _MODE_LOCK:
         owner = _APPLICATION_OWNERS.get(app_id)
-        if owner is not None and owner.agent() not in (None, agent):
+        if owner is not None and owner is not agent:
             message = (
                 f"Dapr application {app_id!r} already hosts another Drasi agent. "
                 "Use one Drasi-enabled logical agent per Dapr application."
             )
             logger.error("%s", message)
             raise DrasiApplicationConflictError(message)
-        if owner is None or owner.agent() is None:
-            owner = _ApplicationOwner(ref(agent))
-            _APPLICATION_OWNERS[app_id] = owner
-        owner.registrations += 1
-
-    def release() -> None:
-        with _MODE_LOCK:
-            if _APPLICATION_OWNERS.get(app_id) is owner:
-                owner.registrations -= 1
-                if owner.registrations == 0:
-                    del _APPLICATION_OWNERS[app_id]
-
-    return release
+        # One owner for this process lifetime; shutdown is not an agent handoff.
+        _APPLICATION_OWNERS[app_id] = agent
 
 
 def _guard_application(callback: ActivationCallback) -> ActivationCallback:
     lock = Lock()
-    active = False
+    attempted = False
 
-    def activate(context: ActivationContext) -> Callable[[], None]:
-        nonlocal active
+    def activate(context: ActivationContext) -> Callable[[], None] | None:
+        nonlocal attempted
         with lock:
-            if active:
+            if attempted:
                 message = (
-                    "This Drasi registration is already hosted; shut it down first."
+                    "This Drasi hosting lifecycle has ended or failed. "
+                    "Restart the application; do not reuse its agent or runner."
                 )
                 logger.error("%s", message)
                 raise DrasiApplicationConflictError(message)
-            release = _claim_application(context.agent)
-            try:
-                closer = callback(context)
-                if closer is not None and not callable(closer):
-                    raise TypeError("A Drasi activation must return a closer or None.")
-            except BaseException:
-                release()
-                raise
-            active = True
-
-        def close() -> None:
-            nonlocal active
-            with lock:
-                if not active:
-                    return
-                if closer is not None:
-                    closer()
-                release()
-                active = False
-
-        return close
+            _claim_application(context.agent)
+            attempted = True
+            return callback(context)
 
     return activate
 

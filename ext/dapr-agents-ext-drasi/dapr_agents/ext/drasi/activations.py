@@ -401,17 +401,20 @@ def register_drasi_trigger(
             nonlocal closed
             if closed:
                 return
-            closed = True
-
+            errors = []
             for closer in closers:
                 try:
                     closer()
-                except Exception:
-                    # Catch exceptions here instead of propagating to the runner.
-                    # Otherwise, a closer that raises prevents the remaining closers from being called.
+                except Exception as error:
                     logger.exception(
                         f"[drasi-trigger]: Error while closing subscription for agent '{agent_name}'"
                     )
+                    errors.append(error)
+            if errors:
+                raise ExceptionGroup(
+                    "Drasi static subscription cleanup failed.", errors
+                )
+            closed = True
 
         return _close
 

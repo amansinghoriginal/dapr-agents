@@ -636,7 +636,7 @@ def test_consumer_dead_letters_deep_json_and_continues_with_valid_deliveries(
         StopIteration(),
     ),
 )
-def test_unexpected_stream_termination_is_visible_to_the_owner(
+def test_unexpected_stream_termination_is_logged_without_blocking_cleanup(
     config: ResolvedDrasiConfig,
     admission: Mock,
     client: MagicMock,
@@ -651,8 +651,9 @@ def test_unexpected_stream_termination_is_visible_to_the_owner(
     stream.messages.put(error)
     assert stream.closed.wait(timeout=5)
 
-    with pytest.raises(DrasiDeliveryError):
-        close()
+    close()
+    close()
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)
     assert "SENTINEL" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
 
@@ -665,6 +666,7 @@ def test_unexpected_subscription_exception_closes_the_consumer(
     stream: _Stream,
     insert_delivery: AgentDelivery,
     mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     mocker.patch.object(stream, "respond", side_effect=RuntimeError("ROW_SENTINEL"))
     close = subscribe_drasi_inbox(
@@ -673,8 +675,8 @@ def test_unexpected_subscription_exception_closes_the_consumer(
     stream.messages.put(_message(insert_delivery))
     assert stream.closed.wait(timeout=5)
 
-    with pytest.raises(DrasiDeliveryError, match="consumer failed"):
-        close()
+    close()
+    assert "Drasi inbox consumer failed" in caplog.text
     assert stream.responses.empty()
 
 
@@ -753,13 +755,14 @@ def test_close_failure_is_explicit_and_cleanup_can_be_retried(
     assert "SENTINEL" not in caplog.text
 
 
-def test_background_cleanup_failure_is_reported_by_the_closer(
+def test_background_cleanup_failure_is_logged_and_owner_can_finish_cleanup(
     config: ResolvedDrasiConfig,
     admission: Mock,
     client: MagicMock,
     workflow: MagicMock,
     stream: _Stream,
     mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     attempted = Event()
     original_close = stream.close
@@ -777,8 +780,8 @@ def test_background_cleanup_failure_is_reported_by_the_closer(
     stream.messages.put(StopIteration())
     assert attempted.wait(timeout=5)
 
-    with pytest.raises(DrasiDeliveryError, match="Could not close"):
-        close()
+    close()
+    assert "Drasi inbox stream close failed" in caplog.text
     assert stream.closed.is_set()
 
 
@@ -1089,8 +1092,8 @@ def test_native_sdk_inactive_response_failure_surfaces_on_the_next_read(
     assert not threads[0].is_alive()
     assert subscription._send_queue.empty()
     assert "Can't send message on inactive stream" in caplog.text
-    with pytest.raises(DrasiDeliveryError, match="stream stopped unexpectedly"):
-        close()
+    close()
+    assert "Drasi inbox stream stopped" in caplog.text
     assert native_stream.cancelled
 
 

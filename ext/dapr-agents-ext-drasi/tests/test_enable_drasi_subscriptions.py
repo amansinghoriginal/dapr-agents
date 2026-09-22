@@ -46,7 +46,12 @@ from dapr_agents.ext.drasi import (
     enable_drasi_subscriptions,
     register_drasi_trigger,
 )
-from dapr_agents.ext.drasi import _registration, router_client, subscription_manager
+from dapr_agents.ext.drasi import (
+    _registration,
+    activations,
+    router_client,
+    subscription_manager,
+)
 from dapr_agents.ext.drasi._models import (
     IntentDocument,
     SubscriptionIntent,
@@ -146,7 +151,6 @@ def harness(
 
     monkeypatch.setattr("dapr_agents.agents.base.DaprClient", client_factory)
     monkeypatch.setattr(router_client.httpx, "AsyncClient", server.client)
-    monkeypatch.setattr(_registration, "_APPLICATION_OWNERS", {})
     monkeypatch.delenv("DAPR_API_MAX_RETRIES", raising=False)
     incarnations = itertools.count(1)
     monkeypatch.setattr(
@@ -375,7 +379,7 @@ def test_real_tools_manager_store_admission_and_delivery_work_together(
 
 
 @pytest.mark.parametrize("per_agent", (False, True))
-def test_rehosting_reconciles_and_rebinds_tools_without_closed_clients(
+def test_shutdown_is_terminal_without_removing_durable_intent(
     harness: _Harness,
     active_intent: SubscriptionIntent,
     per_agent: bool,
@@ -390,28 +394,62 @@ def test_rehosting_reconciles_and_rebinds_tools_without_closed_clients(
     harness.enable()
     _confirm_subscribe(harness, incarnation=active_intent.incarnation)
     harness.runner.workflow(harness.agent)
-    old_tools = harness.agent.tool_executor.list_tools()
     harness.runner.shutdown(harness.agent if per_agent else None)
     assert harness.repository.get(active_intent.query_id).status == "active"
     assert harness.streams[0].closed.is_set()
 
-    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
-    harness.runner.workflow(harness.agent)
-    assert len(harness.agent.get_llm_tools()) == 6
-    assert harness.agent.get_llm_tools()[0] is old_tools[0]
-    assert harness.agent.get_llm_tools()[1] is not old_tools[1]
-    assert len(harness.streams) == 2
-    _confirm_subscribe(
-        harness, incarnation=active_intent.incarnation, operations=("d",)
-    )
-    updated = _tool(harness, "subscribe_service-errors_").run(
-        operations=["d"], instructions="Handle departures."
-    )
-    assert not updated.isError
+    with pytest.raises(RuntimeError, match="Restart the application"):
+        harness.runner.workflow(harness.agent)
+    harness.runtime.start.assert_called_once()
+    assert len(harness.streams) == 1
+    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
     assert (
         harness.repository.get(active_intent.query_id).incarnation
         == active_intent.incarnation
     )
+
+
+def test_new_process_state_recovers_with_fresh_agent_and_runner(
+    harness: _Harness,
+    active_intent: SubscriptionIntent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness.repository.initialize(
+        IntentDocument(
+            format_version=1,
+            scope=harness.scope,
+            intents={active_intent.query_id: active_intent},
+        )
+    )
+    harness.enable()
+    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
+    harness.runner.workflow(harness.agent)
+    harness.runner.shutdown()
+
+    # Simulate a new process while retaining only persisted backend data.
+    monkeypatch.setattr(_registration, "_APPLICATION_OWNERS", {})
+    restored = harness.make_agent(harness.scope.agent_name, [])
+    runner = AgentRunner(
+        wf_client=MagicMock(spec=DaprWorkflowClient),
+        client_factory=harness.client_factory,
+    )
+    try:
+        enable_drasi_subscriptions(
+            restored,
+            router_id=harness.scope.router_id,
+            namespace=harness.scope.namespace,
+        )
+        _confirm_subscribe(harness, incarnation=active_intent.incarnation)
+        runner.workflow(restored)
+        assert restored.runtime is not harness.agent.runtime
+        assert runner._wf_client is not harness.runner._wf_client
+        intent = harness.repository.get(active_intent.query_id)
+        assert intent is not None
+        assert intent.status == "active"
+        assert intent.incarnation == active_intent.incarnation
+        assert len(restored.get_llm_tools()) == 5
+    finally:
+        runner.shutdown()
 
 
 def test_empty_catalog_and_initially_toolless_agent_still_expose_local_inspection(
@@ -508,11 +546,12 @@ def test_failed_inbox_cleanup_can_be_retried_without_releasing_a_live_owner(
     harness.runner.shutdown(harness.agent if per_agent else None)
 
     assert stream.closed.is_set()
-    assert harness.scope.app_id not in _registration._APPLICATION_OWNERS
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
     assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
     client.close.assert_called_once()
-    harness.runner.workflow(harness.agent)
-    assert len(harness.streams) == 2
+    with pytest.raises(RuntimeError, match="Restart the application"):
+        harness.runner.workflow(harness.agent)
+    assert len(harness.streams) == 1
 
 
 @pytest.mark.parametrize("first_mode", ("static", "dynamic"))
@@ -536,7 +575,7 @@ def test_duplicate_enablement_is_not_a_second_continuation(harness: _Harness):
     assert len(harness.agent.pre_start_activations) == 1
 
 
-def test_another_local_agent_is_rejected_until_the_owner_shuts_down(
+def test_application_ownership_does_not_transfer_after_shutdown(
     harness: _Harness,
 ) -> None:
     harness.enable()
@@ -554,30 +593,124 @@ def test_another_local_agent_is_rejected_until_the_owner_shuts_down(
         assert len(harness.streams) == 1
         assert not other.is_started
         harness.runner.shutdown(harness.agent)
-        runner.workflow(other)
-        assert len(harness.streams) == 2
+        with pytest.raises(RuntimeError, match="one Drasi-enabled"):
+            runner.workflow(other)
+        assert len(harness.streams) == 1
     finally:
         runner.shutdown()
 
 
-def test_static_application_ownership_survives_until_all_registrations_close(
+def test_static_application_ownership_lasts_for_the_process(
     harness: _Harness,
 ) -> None:
     for _ in range(2):
-        register_activation(harness.agent, mode="static", callback=lambda ctx: None)
+        register_activation(harness.agent, mode="static", callback=lambda ctx: Mock())
     harness.runner.workflow(harness.agent)
     closers = harness.runner._activation_closers[id(harness.agent)]
     closers[0]()
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id].registrations == 1
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
     other = harness.make_agent("OtherAgent", [])
     with pytest.raises(DrasiApplicationConflictError, match="one Drasi-enabled"):
         _registration._claim_application(other)
     harness.runner.shutdown()
-    assert harness.scope.app_id not in _registration._APPLICATION_OWNERS
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
+
+
+@pytest.mark.parametrize("per_agent", (False, True))
+def test_runtime_shutdown_failure_keeps_live_worker_dependencies(
+    harness: _Harness, per_agent: bool
+) -> None:
+    harness.enable()
+    harness.runner.workflow(harness.agent)
+    client = harness.runner._dapr_client
+    harness.runtime.shutdown.side_effect = RuntimeError("worker still running")
+
+    with pytest.raises(RuntimeError, match="worker still running"):
+        harness.runner.shutdown(harness.agent if per_agent else None)
+
+    assert harness.agent.is_started
+    assert harness.agent in harness.runner._managed_agents
+    assert not harness.streams[0].closed.is_set()
+    assert len(harness.agent.get_llm_tools()) == 6
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
+    client.close.assert_not_called()
+    harness.workflow.close.assert_not_called()
+    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
+        harness.runner.workflow(harness.agent)
+
+    harness.runtime.shutdown.side_effect = None
+    harness.runner.shutdown(harness.agent if per_agent else None)
+    assert not harness.agent.is_started
+    assert harness.streams[0].closed.is_set()
+    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
+    with pytest.raises(RuntimeError, match="Restart the application"):
+        harness.runner.workflow(harness.agent)
+
+
+def test_failed_start_and_uncertain_runtime_stop_keep_prepared_resources(
+    harness: _Harness,
+) -> None:
+    harness.enable()
+    harness.runtime.start.side_effect = RuntimeError("startup failed")
+    harness.runtime.shutdown.side_effect = RuntimeError("shutdown uncertain")
+
+    with pytest.raises(ExceptionGroup, match="startup and shutdown both failed"):
+        harness.runner.workflow(harness.agent)
+
+    assert harness.agent.is_started
+    assert harness.agent in harness.runner._managed_agents
+    assert len(harness.agent.get_llm_tools()) == 6
+    assert not harness.streams[0].closed.is_set()
+    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
+        harness.runner.workflow(harness.agent)
+
+    harness.runtime.shutdown.side_effect = None
+    harness.runner.shutdown()
+    assert harness.streams[0].closed.is_set()
+    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
+
+
+def test_historical_inbox_failure_does_not_pin_stopped_resources(
+    harness: _Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness.enable()
+    harness.runner.workflow(harness.agent)
+    harness.streams[0].messages.put(StopIteration())
+    assert harness.streams[0].closed.wait(timeout=3)
+
+    harness.runner.shutdown()
+
+    assert "Drasi inbox stream ended unexpectedly" in caplog.text
+    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
+    assert harness.runner._activation_closers == {}
+    assert harness.runner._dapr_client is None
+    assert all(not http.owner[0].is_alive() for http in harness.server.clients)
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
+
+
+def test_static_cleanup_surfaces_failures_and_attempts_all_closers(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failed = Mock(side_effect=[RuntimeError("static close failed"), None])
+    other = Mock()
+    monkeypatch.setattr(activations, "_subscribe", lambda ctx, specs: [failed, other])
+    register_drasi_trigger(harness.agent, query_id="service-errors")
+    harness.runner.workflow(harness.agent)
+
+    with pytest.raises(ExceptionGroup, match="retry shutdown"):
+        harness.runner.shutdown()
+
+    failed.assert_called_once()
+    other.assert_called_once()
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
+    harness.runner.shutdown()
+    assert failed.call_count == 2
+    assert harness.runner._activation_closers == {}
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
 
 
 @pytest.mark.parametrize("phase", ("catalog", "store", "inbox", "worker"))
-def test_failed_preparation_unwinds_and_can_be_retried(
+def test_failed_preparation_unwinds_and_requires_application_restart(
     harness: _Harness, phase: str
 ) -> None:
     harness.agent.execution.tool_choice = None
@@ -608,7 +741,7 @@ def test_failed_preparation_unwinds_and_can_be_retried(
     assert not harness.agent.is_started
     assert len(harness.agent.tool_executor.list_tools()) == 1
     assert harness.agent.execution.tool_choice is None
-    assert harness.scope.app_id not in _registration._APPLICATION_OWNERS
+    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
     assert all(not http.owner[0].is_alive() for http in harness.server.clients)
     assert all(call["name"] != "unsubscribe" for call in harness.server.calls)
 
@@ -618,9 +751,9 @@ def test_failed_preparation_unwinds_and_can_be_retried(
     harness.runner._client_factory = harness.client_factory
     if harness.runner._dapr_client is not None:
         harness.runner._dapr_client.subscribe.side_effect = harness.open_stream
-    harness.runner.workflow(harness.agent)
-    assert len(harness.agent.get_llm_tools()) == 6
-    assert harness.agent.is_started
+    with pytest.raises(RuntimeError, match="Restart the application"):
+        harness.runner.workflow(harness.agent)
+    assert not harness.agent.is_started
 
 
 def test_partial_tool_attachment_is_rolled_back(
@@ -646,8 +779,9 @@ def test_partial_tool_attachment_is_rolled_back(
     assert executor.get_tool_names() == ["record_assessment"]
     assert harness.streams == []
     assert all(not http.owner[0].is_alive() for http in harness.server.clients)
-    harness.runner.workflow(harness.agent)
-    assert len(executor.list_tools()) == 6
+    with pytest.raises(RuntimeError, match="Restart the application"):
+        harness.runner.workflow(harness.agent)
+    assert executor.get_tool_names() == ["record_assessment"]
 
 
 def test_tool_name_collision_is_detected_before_state_or_router_mutation(
