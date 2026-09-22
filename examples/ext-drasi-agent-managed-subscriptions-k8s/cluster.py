@@ -160,7 +160,8 @@ def load_model_settings(env_file: Path) -> ModelSettings:
         dotenv_values(env_file, interpolate=False) if env_file.is_file() else {}
     )
     selected = {
-        key: os.environ.get(key) or file_values.get(key) for key in MODEL_ENV_KEYS
+        key: os.environ[key] if key in os.environ else file_values.get(key)
+        for key in MODEL_ENV_KEYS
     }
     return ModelSettings.from_env(
         {key: value for key, value in selected.items() if value is not None}
@@ -178,6 +179,43 @@ def load_ownership() -> Ownership:
     return owner
 
 
+def validate_runtime_paths() -> None:
+    for directory in (RUNTIME, RUNTIME / "drasi-home"):
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise DemoError(
+                f"Expected a real runtime directory, not a link or file: {directory}."
+            )
+    for file in (OWNERSHIP, KUBECONFIG):
+        if file.is_symlink() or (file.exists() and not file.is_file()):
+            raise DemoError(
+                f"Expected a regular runtime file, not a link or directory: {file}."
+            )
+
+
+def cluster_present() -> bool:
+    clusters = json.loads(
+        run(["k3d", "cluster", "list", "--output", "json"], capture=True)
+    )
+    if any(item["name"] == CLUSTER_NAME for item in clusters):
+        return True
+    # Also reject colliding or partial nodes that k3d cannot identify as a cluster.
+    return bool(
+        run(
+            [
+                "docker",
+                "container",
+                "ls",
+                "--all",
+                "--filter",
+                f"name=^/k3d-{CLUSTER_NAME}-(server-[0-9]+|agent-[0-9]+|serverlb)$",
+                "--format",
+                "{{.ID}}",
+            ],
+            capture=True,
+        ).strip()
+    )
+
+
 def check_ownership() -> Ownership:
     owner = load_ownership()
     labels = json.loads(
@@ -192,7 +230,7 @@ def check_ownership() -> Ownership:
             capture=True,
         )
     )
-    if labels.get(OWNER_LABEL) != str(owner.owner):
+    if not isinstance(labels, dict) or labels.get(OWNER_LABEL) != str(owner.owner):
         raise DemoError(
             "Cluster ownership does not match this checkout; refusing access."
         )
@@ -363,11 +401,9 @@ def apply_secret(name: str, namespace: str, values: dict[str, str]) -> None:
 
 def setup(env_file: Path) -> None:
     require_tools("docker", "git", "make", "kubectl", "k3d", "helm")
+    validate_runtime_paths()
     settings = load_model_settings(env_file)
-    clusters = json.loads(
-        run(["k3d", "cluster", "list", "--output", "json"], capture=True)
-    )
-    if any(item["name"] == CLUSTER_NAME for item in clusters) or OWNERSHIP.exists():
+    if cluster_present() or OWNERSHIP.exists():
         raise DemoError(
             "A cluster or ownership record already exists. Inspect it and use this "
             "example's cleanup command before setting up a fresh demonstration."
@@ -396,7 +432,8 @@ def setup(env_file: Path) -> None:
             "--k3s-arg",
             "--disable=traefik@server:0",
             "--wait",
-        ]
+        ],
+        env={**os.environ, "KUBECONFIG": str(KUBECONFIG)},
     )
     check_ownership()
     KUBECONFIG.write_text(run(["k3d", "kubeconfig", "get", CLUSTER_NAME], capture=True))
@@ -532,22 +569,25 @@ def setup(env_file: Path) -> None:
 
 def cleanup() -> None:
     require_tools("docker", "k3d")
-    check_ownership()
-    run(
-        ["k3d", "cluster", "delete", CLUSTER_NAME],
-        env={**os.environ, "KUBECONFIG": str(KUBECONFIG)},
-    )
+    validate_runtime_paths()
+    load_ownership()
+    if cluster_present():
+        check_ownership()
+        run(
+            ["k3d", "cluster", "delete", CLUSTER_NAME],
+            env={**os.environ, "KUBECONFIG": str(KUBECONFIG)},
+        )
+    else:
+        logger.info(
+            "Reference cluster is absent; clearing orphaned local ownership state."
+        )
     KUBECONFIG.unlink(missing_ok=True)
     home = RUNTIME / "drasi-home"
-    if home.is_symlink():
-        raise DemoError(
-            "Refusing to remove a symlinked private Drasi configuration directory."
-        )
     if home.exists():
         shutil.rmtree(home)
     OWNERSHIP.unlink()
     logger.info(
-        "Removed only the owned reference cluster and its client credentials. "
+        "Cleared the reference cluster's local ownership and client credentials. "
         "Source checkouts, built images, build caches, and the original .env remain."
     )
 

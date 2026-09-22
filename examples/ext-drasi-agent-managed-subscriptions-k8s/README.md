@@ -39,7 +39,7 @@ The agent-facing Redis is separate from Drasi's internal broker. Namespace-local
 
 Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Make, kubectl, k3d, Helm, and uv. The first source build can take significant time and disk space. No host Rust, Go, Drasi CLI, Dapr CLI, or Python package installation outside the example is required.
 
-| Input | Reference pin |
+| Input | Reference version or source pin |
 |---|---|
 | k3d | `v5.8.3` |
 | Kubernetes node | `rancher/k3s:v1.32.5-k3s1` |
@@ -56,6 +56,8 @@ Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Ma
 | Agent/router Python contract | The extension's immutable public Git dependency, resolved in this example's `uv.lock` |
 
 `cluster.py` pins the Platform-provided MongoDB and internal Redis images by digest without replacing their configuration or provisioning another router state store. It builds only the Platform components this example uses, selecting the provided Azure Linux variant. The agent image gets a tag derived from its built image ID, not `latest`.
+
+Use the listed CLI versions when reproducing this environment; setup checks tool availability, not exact installed versions. Other images use explicit version tags, which registries can republish. This reference setup does not claim hermetic or bit-for-bit image reproducibility.
 
 This directory has an isolated uv workspace and lockfile so it can run before the later shared workspace/CI/documentation handoff. It installs the core and extension from this repository checkout. Do not replace them with a released package that lacks `enable_drasi_subscriptions()`.
 
@@ -80,7 +82,7 @@ LLM_MODEL=YOUR-DEPLOYMENT
 
 An existing v1 `/responses` or `/chat/completions` URL is also accepted and normalized to the SDK's base URL. This agent uses **Chat Completions with tool calling**, so the deployment must support that API. `LLM_PROVIDER=openai` also works with a compatible v1 endpoint.
 
-Only these four settings are copied into the example's Kubernetes Secret. Unrelated `.env` values are not copied. The file is not sourced as shell code, credentials are sent to kubectl on standard input rather than command-line arguments, and the Docker build context excludes `.env` files. Process environment values take precedence over file values.
+Only these four settings are copied into the example's Kubernetes Secret. Unrelated `.env` values are not copied. The file is not sourced as shell code, credentials are sent to kubectl on standard input rather than command-line arguments, and the Docker build context excludes `.env` files. Process environment values, including empty values, take precedence over file values. Empty required settings fail explicitly rather than falling back to credentials or configuration from the file.
 
 If your configuration is already in the repository root, use `--env-file ../../.env` below instead of making another copy. Do not commit credentials.
 
@@ -130,6 +132,8 @@ PostgreSQL enforces `PRIMARY KEY (service)`. The action uses a parameterized `IN
 
 The ordinary assessment tool and all generated subscription tools remain available in event workflows. Stored handling instructions authorize work; projected event data is explicitly untrusted and cannot choose the action's destination or business key.
 
+Establishing follow-up monitoring and recording the error assessment are independent actions in this example. Neither ordering nor atomicity between those tool calls is required.
+
 ## Inspect and control the agent
 
 The walkthrough stops monitoring at its end. While the environment is still running, you can submit another ordinary task or inspect it:
@@ -168,7 +172,9 @@ If the model does not choose the expected monitoring, inspect its completed resp
 uv run --locked python cluster.py cleanup
 ```
 
-Cleanup verifies both the local ownership record and the matching Docker label before deleting the named cluster. It removes that cluster's applications, volumes, rules, intent, generated Secrets, kubeconfig, and private Drasi client configuration. It does not delete another cluster, alter your default context, remove your original `.env`, or touch the Azure model deployment.
+Cleanup validates local runtime paths before any deletion and verifies the local ownership record and matching Docker label before deleting an existing cluster. It removes that cluster's applications, volumes, rules, intent, generated Secrets, kubeconfig, and private Drasi client configuration. It does not delete another cluster, alter your default context, remove your original `.env`, or touch the Azure model deployment.
+
+If creation failed before a cluster exists, the ownership marker may remain. Run the same cleanup command: it removes orphaned local state only after both k3d and Docker confirm that no matching cluster or node containers remain. Failed inventory queries or resources whose ownership cannot be verified preserve the marker and credentials. Fix unsafe local path types or symlinks before retrying cleanup; do not manually discard the ownership marker for a live cluster.
 
 The pinned source checkout, built images, and build caches remain for reuse. No global Docker prune, namespace wildcard, cluster-wide unsubscribe, or host-wide process kill is used.
 

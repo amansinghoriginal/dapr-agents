@@ -74,8 +74,9 @@ MONITORING_TASK = (
     "to existing checkout rollout records, but not new or removed rollout records. "
     "Do not monitor rollouts until an error calls for it. When the observed rollout "
     "becomes healthy, record a healthy assessment; if it fails, record an "
-    "investigating assessment. Establish any requested follow-up monitoring before "
-    "recording the event's assessment, then finish. Save everything needed to handle "
+    "investigating assessment. Establishing follow-up monitoring and recording an "
+    "error assessment are independent actions; either order is acceptable. Complete "
+    "both when requested, then finish. Save everything needed to handle "
     "each future observation independently. Do not write an assessment now."
 )
 STOP_TASK = (

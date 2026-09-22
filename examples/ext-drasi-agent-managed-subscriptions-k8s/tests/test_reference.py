@@ -12,6 +12,7 @@
 #
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -50,6 +51,21 @@ def model_environment() -> dict[str, str]:
         "LLM_API_KEY": "synthetic-test-key",
         "LLM_MODEL": "test-deployment",
     }
+
+
+@pytest.fixture
+def owned_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> cluster.Ownership:
+    monkeypatch.setattr(cluster, "RUNTIME", tmp_path)
+    monkeypatch.setattr(cluster, "OWNERSHIP", tmp_path / "ownership.json")
+    monkeypatch.setattr(cluster, "KUBECONFIG", tmp_path / "kubeconfig.yaml")
+    monkeypatch.setattr(cluster, "require_tools", Mock())
+    owner = cluster.Ownership(cluster=cluster.CLUSTER_NAME, owner=uuid4())
+    cluster.OWNERSHIP.write_text(owner.model_dump_json())
+    cluster.KUBECONFIG.write_text("private credentials")
+    home = tmp_path / "drasi-home"
+    home.mkdir()
+    (home / "registration").write_text("private registration")
+    return owner
 
 
 @pytest.mark.parametrize("suffix", ["", "responses", "chat/completions"])
@@ -100,6 +116,34 @@ def test_only_model_settings_are_copied_from_env_file(
     assert "do-not-copy" not in settings.secret_data().values()
 
 
+@pytest.mark.parametrize("key", MODEL_ENV_KEYS)
+def test_empty_environment_values_do_not_fall_back_to_file_settings(
+    key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in MODEL_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path / ".env"
+    path.write_text(
+        "\n".join(f"{name}={value}" for name, value in model_environment().items())
+    )
+    monkeypatch.setenv(key, "")
+    with pytest.raises(ValueError, match=key):
+        cluster.load_model_settings(path)
+
+
+def test_nonempty_environment_values_override_file_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in MODEL_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path / ".env"
+    path.write_text(
+        "\n".join(f"{name}={value}" for name, value in model_environment().items())
+    )
+    monkeypatch.setenv("LLM_MODEL", "environment-deployment")
+    assert cluster.load_model_settings(path).model == "environment-deployment"
+
+
 def test_action_arguments_cannot_choose_identity_or_destination() -> None:
     assert set(AssessmentInput.model_fields) == {"status", "summary"}
     for extra in ("service", "idempotency_key", "database", "sql"):
@@ -146,10 +190,9 @@ def test_database_failure_is_not_reported_as_a_success(
 
 
 def test_missing_owned_cluster_never_invokes_deletion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cluster, "OWNERSHIP", tmp_path / "missing.json")
-    monkeypatch.setattr(cluster, "require_tools", Mock())
+    cluster.OWNERSHIP.unlink()
     commands = Mock()
     monkeypatch.setattr(cluster, "run", commands)
     with pytest.raises(cluster.DemoError, match="ownership record"):
@@ -157,55 +200,189 @@ def test_missing_owned_cluster_never_invokes_deletion(
     commands.assert_not_called()
 
 
-def test_foreign_cluster_label_never_invokes_deletion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("labels", [None, {}, {cluster.OWNER_LABEL: "other-owner"}])
+def test_foreign_or_null_cluster_labels_never_invoke_deletion(
+    labels: dict[str, str] | None,
+    owned_runtime: cluster.Ownership,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "owner.json"
-    path.write_text(
-        cluster.Ownership(cluster=cluster.CLUSTER_NAME, owner=uuid4()).model_dump_json()
-    )
-    monkeypatch.setattr(cluster, "OWNERSHIP", path)
-    monkeypatch.setattr(cluster, "require_tools", Mock())
-    commands = Mock(return_value=json.dumps({cluster.OWNER_LABEL: str(uuid4())}))
+    monkeypatch.setattr(cluster, "cluster_present", Mock(return_value=True))
+    commands = Mock(return_value=json.dumps(labels))
     monkeypatch.setattr(cluster, "run", commands)
     with pytest.raises(cluster.DemoError, match="does not match"):
         cluster.cleanup()
     assert commands.call_count == 1
     assert commands.call_args.args[0][:2] == ["docker", "inspect"]
+    assert cluster.OWNERSHIP.exists()
+    assert cluster.KUBECONFIG.exists()
 
 
 def test_cleanup_preserves_builds_and_other_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    owned_runtime: cluster.Ownership,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    owner_file = tmp_path / "owner.json"
-    owner_file.write_text("owned")
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("private credentials")
     private_home = tmp_path / "drasi-home"
-    private_home.mkdir()
-    (private_home / "registration").write_text("private registration")
     retained = tmp_path / "agent-image.json"
     retained.write_text("keep built image metadata")
-    monkeypatch.setattr(cluster, "RUNTIME", tmp_path)
-    monkeypatch.setattr(cluster, "OWNERSHIP", owner_file)
-    monkeypatch.setattr(cluster, "KUBECONFIG", kubeconfig)
-    monkeypatch.setattr(cluster, "require_tools", Mock())
-    monkeypatch.setattr(cluster, "check_ownership", Mock())
-    commands = Mock()
+    monkeypatch.setattr(cluster, "cluster_present", Mock(return_value=True))
+    commands = Mock(
+        side_effect=[json.dumps({cluster.OWNER_LABEL: str(owned_runtime.owner)}), ""]
+    )
     monkeypatch.setattr(cluster, "run", commands)
     cluster.cleanup()
-    commands.assert_called_once()
+    assert commands.call_count == 2
+    assert commands.call_args_list[0].args[0][:2] == ["docker", "inspect"]
     assert commands.call_args.args[0] == [
         "k3d",
         "cluster",
         "delete",
         cluster.CLUSTER_NAME,
     ]
-    assert commands.call_args.kwargs["env"]["KUBECONFIG"] == str(kubeconfig)
-    assert not owner_file.exists()
-    assert not kubeconfig.exists()
+    assert commands.call_args.kwargs["env"]["KUBECONFIG"] == str(cluster.KUBECONFIG)
+    assert not cluster.OWNERSHIP.exists()
+    assert not cluster.KUBECONFIG.exists()
     assert not private_home.exists()
     assert retained.read_text() == "keep built image metadata"
+
+
+def test_cleanup_removes_orphaned_state_only_after_confirming_absence(
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands = Mock(side_effect=["[]", ""])
+    monkeypatch.setattr(cluster, "run", commands)
+    cluster.cleanup()
+    assert commands.call_count == 2
+    assert commands.call_args_list[0].args[0][:3] == ["k3d", "cluster", "list"]
+    assert commands.call_args_list[1].args[0][:3] == ["docker", "container", "ls"]
+    assert not cluster.OWNERSHIP.exists()
+    assert not cluster.KUBECONFIG.exists()
+    assert not (cluster.RUNTIME / "drasi-home").exists()
+
+
+def test_failed_create_can_be_recovered_through_guarded_cleanup(
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cluster.OWNERSHIP.unlink()
+    monkeypatch.setattr(cluster, "build", Mock())
+    monkeypatch.setattr(
+        cluster,
+        "load_model_settings",
+        Mock(return_value=ModelSettings.from_env(model_environment())),
+    )
+    failure = subprocess.CalledProcessError(1, ["k3d", "cluster", "create"])
+    commands = Mock(side_effect=["[]", "", failure])
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(subprocess.CalledProcessError):
+        cluster.setup(cluster.RUNTIME / ".env")
+    assert cluster.OWNERSHIP.exists()
+    assert commands.call_args.args[0][:3] == ["k3d", "cluster", "create"]
+    assert commands.call_args.kwargs["env"]["KUBECONFIG"] == str(cluster.KUBECONFIG)
+
+    commands.reset_mock(side_effect=True)
+    commands.side_effect = ["[]", ""]
+    cluster.cleanup()
+    assert not cluster.OWNERSHIP.exists()
+
+
+@pytest.mark.parametrize("failed_probe", ["k3d", "docker"])
+def test_failed_inventory_does_not_discard_ownership(
+    failed_probe: str,
+    owned_runtime: cluster.Ownership,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = subprocess.CalledProcessError(1, [failed_probe])
+    commands = Mock(side_effect=[failure] if failed_probe == "k3d" else ["[]", failure])
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(subprocess.CalledProcessError):
+        cluster.cleanup()
+    assert cluster.OWNERSHIP.exists()
+    assert cluster.KUBECONFIG.exists()
+    assert (cluster.RUNTIME / "drasi-home" / "registration").exists()
+
+
+def test_unowned_colliding_node_is_not_treated_as_an_absent_cluster(
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands = Mock(side_effect=["[]", "container-id\n", "null"])
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(cluster.DemoError, match="does not match"):
+        cluster.cleanup()
+    assert commands.call_count == 3
+    assert cluster.OWNERSHIP.exists()
+
+
+def test_partial_cluster_without_an_owned_server_is_preserved(
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands = Mock(
+        side_effect=[
+            json.dumps([{"name": cluster.CLUSTER_NAME}]),
+            subprocess.CalledProcessError(1, ["docker", "inspect"]),
+        ]
+    )
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(subprocess.CalledProcessError):
+        cluster.cleanup()
+    assert commands.call_count == 2
+    assert cluster.OWNERSHIP.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("drasi-home", "symlink"),
+        ("drasi-home", "file"),
+        ("kubeconfig.yaml", "symlink"),
+        ("kubeconfig.yaml", "directory"),
+        ("ownership.json", "symlink"),
+        ("ownership.json", "directory"),
+    ],
+)
+def test_unsafe_runtime_paths_fail_before_cluster_deletion(
+    name: str,
+    kind: str,
+    owned_runtime: cluster.Ownership,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = cluster.RUNTIME / name
+    target = cluster.RUNTIME / "untouched"
+    target.write_text("keep this file")
+    if path.is_dir():
+        (path / "registration").unlink()
+        path.rmdir()
+    else:
+        path.unlink()
+    if kind == "symlink":
+        path.symlink_to(target)
+    elif kind == "file":
+        path.write_text("not a directory")
+    else:
+        path.mkdir()
+    commands = Mock()
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(cluster.DemoError, match="Expected a"):
+        cluster.cleanup()
+    commands.assert_not_called()
+    assert target.read_text() == "keep this file"
+
+
+def test_failed_cluster_deletion_preserves_local_recovery_state(
+    owned_runtime: cluster.Ownership, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cluster, "cluster_present", Mock(return_value=True))
+    commands = Mock(
+        side_effect=[
+            json.dumps({cluster.OWNER_LABEL: str(owned_runtime.owner)}),
+            subprocess.CalledProcessError(1, ["k3d", "cluster", "delete"]),
+        ]
+    )
+    monkeypatch.setattr(cluster, "run", commands)
+    with pytest.raises(subprocess.CalledProcessError):
+        cluster.cleanup()
+    assert cluster.OWNERSHIP.exists()
+    assert cluster.KUBECONFIG.exists()
+    assert (cluster.RUNTIME / "drasi-home" / "registration").exists()
 
 
 def test_platform_manifest_pins_preserve_managed_infrastructure() -> None:
@@ -288,6 +465,8 @@ def test_example_uses_real_router_and_separate_namespace_local_broker() -> None:
     assert "subscribe_" not in MONITORING_TASK
     assert "checkout-server-errors" not in MONITORING_TASK
     assert "checkout-rollout-status" not in MONITORING_TASK
+    assert "independent actions" in MONITORING_TASK
+    assert "either order is acceptable" in MONITORING_TASK
 
 
 def test_cloud_event_and_packed_marker_inspection() -> None:
