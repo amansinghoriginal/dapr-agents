@@ -31,6 +31,7 @@ from dapr_agents.types import ToolResult
 import actions
 import cluster
 import demo as demo_module
+import multi_agent_demo
 from actions import AssessmentError, AssessmentInput, AssessmentRecord
 from demo import (
     Demo,
@@ -41,7 +42,7 @@ from demo import (
     stream_id,
     wait_for,
 )
-from settings import MODEL_ENV_KEYS, ModelSettings
+from settings import AGENT_ENV_KEYS, MODEL_ENV_KEYS, AgentSettings, ModelSettings
 
 
 def model_environment() -> dict[str, str]:
@@ -66,6 +67,50 @@ def owned_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> cluster.Ow
     home.mkdir()
     (home / "registration").write_text("private registration")
     return owner
+
+
+def test_default_agent_settings_preserve_the_single_agent_walkthrough() -> None:
+    settings = AgentSettings.from_env({})
+    assert settings.name == "CheckoutSRE"
+    assert settings.namespace == "drasi-m2-demo"
+    assert settings.router_id == "drasi-system/sre-router-reaction"
+    assert settings.pubsub_name == "agent-pubsub"
+    assert settings.state_store_name == "agent-state"
+    assert settings.request_topic == "checkout-sre.requests"
+    assert settings.broadcast_topic == "checkout-sre.broadcast"
+    assert settings.assessment_service == "checkout"
+
+
+def test_agent_settings_support_distinct_application_personas() -> None:
+    environment = {
+        "AGENT_NAME": "ReleaseGuardian",
+        "AGENT_ROLE": "Release guardian",
+        "AGENT_GOAL": "Assess rollout transitions.",
+        "AGENT_NAMESPACE": "applications",
+        "DRASI_ROUTER_ID": "drasi-system/router-reaction",
+        "AGENT_PUBSUB_NAME": "application-pubsub",
+        "AGENT_STATE_STORE_NAME": "application-state",
+        "AGENT_REQUEST_TOPIC": "release.requests",
+        "AGENT_BROADCAST_TOPIC": "release.broadcast",
+        "ASSESSMENT_SERVICE": "checkout-release",
+    }
+    settings = AgentSettings.from_env(environment)
+    assert settings.name == "ReleaseGuardian"
+    assert settings.role == "Release guardian"
+    assert settings.goal == "Assess rollout transitions."
+    assert settings.namespace == "applications"
+    assert settings.router_id == "drasi-system/router-reaction"
+    assert settings.pubsub_name == "application-pubsub"
+    assert settings.state_store_name == "application-state"
+    assert settings.request_topic == "release.requests"
+    assert settings.broadcast_topic == "release.broadcast"
+    assert settings.assessment_service == "checkout-release"
+
+
+@pytest.mark.parametrize("key", AGENT_ENV_KEYS)
+def test_empty_agent_setting_does_not_fall_back_to_default(key: str) -> None:
+    with pytest.raises(ValidationError):
+        AgentSettings.from_env({key: ""})
 
 
 @pytest.mark.parametrize("suffix", ["", "responses", "chat/completions"])
@@ -462,11 +507,82 @@ def test_example_uses_real_router_and_separate_namespace_local_broker() -> None:
     assert not any(
         item["metadata"]["name"].startswith("drasi-statestore") for item in components
     )
+    expected_agent_scopes = {"checkout-sre"}
+    application_resources = [
+        item
+        for item in components
+        if item["metadata"]["namespace"] == "drasi-m2-demo"
+        and item["metadata"]["name"]
+        in {"agent-pubsub", "agent-state", "sre-agent-retries"}
+    ]
+    assert len(application_resources) == 3
+    assert all(
+        set(item["scopes"]) == expected_agent_scopes for item in application_resources
+    )
     assert "subscribe_" not in MONITORING_TASK
     assert "checkout-server-errors" not in MONITORING_TASK
     assert "checkout-rollout-status" not in MONITORING_TASK
     assert "independent actions" in MONITORING_TASK
     assert "either order is acceptable" in MONITORING_TASK
+
+
+def test_multi_agent_setup_expands_scopes_before_applications_start() -> None:
+    default_documents = cluster.application_component_documents(multi_agent=False)
+    multi_documents = cluster.application_component_documents(multi_agent=True)
+    names = {"agent-pubsub", "agent-state", "sre-agent-retries"}
+
+    def scopes(documents: list[dict[str, object]]) -> dict[str, set[str]]:
+        return {
+            str(document["metadata"]["name"]): set(document["scopes"])
+            for document in documents
+            if document["metadata"]["namespace"] == "drasi-m2-demo"
+            and document["metadata"]["name"] in names
+        }
+
+    assert scopes(default_documents) == {name: {"checkout-sre"} for name in names}
+    assert scopes(multi_documents) == {
+        name: {"checkout-sre", *multi_agent_demo.OPTIONAL_AGENT_APP_IDS}
+        for name in names
+    }
+
+
+def test_multi_agent_walkthrough_uses_distinct_identities_and_natural_tasks() -> None:
+    agents = multi_agent_demo.AGENTS
+    assert tuple(spec.app_id for spec in agents[1:]) == (
+        multi_agent_demo.OPTIONAL_AGENT_APP_IDS
+    )
+    assert len({spec.app_id for spec in agents}) == len(agents)
+    assert len({spec.agent_name for spec in agents}) == len(agents)
+    assert len({spec.service for spec in agents}) == len(agents)
+    assert len({spec.inbox for spec in agents}) == len(agents)
+    tasks = (
+        multi_agent_demo.INCIDENT_TASK,
+        multi_agent_demo.RELEASE_TASK,
+        multi_agent_demo.AUDITOR_TASK,
+        multi_agent_demo.SECURITY_TASK,
+    )
+    for task in tasks:
+        assert "subscribe_" not in task
+        assert "checkout-server-errors" not in task
+        assert "checkout-rollout-status" not in task
+
+
+def test_multi_agent_deployment_binds_each_persona_to_its_app() -> None:
+    spec = multi_agent_demo.RELEASE
+    manifest = multi_agent_demo.deployment(spec, "example/image:test")
+    template = manifest["spec"]["template"]
+    assert template["metadata"]["annotations"]["dapr.io/app-id"] == spec.app_id
+    container = template["spec"]["containers"][0]
+    assert container["image"] == "example/image:test"
+    environment = {
+        item["name"]: item["value"] for item in container["env"] if "value" in item
+    }
+    assert environment["AGENT_NAME"] == spec.agent_name
+    assert environment["AGENT_ROLE"] == spec.role
+    assert environment["AGENT_GOAL"] == spec.goal
+    assert environment["ASSESSMENT_SERVICE"] == spec.service
+    assert environment["AGENT_REQUEST_TOPIC"] == f"{spec.app_id}.requests"
+    assert environment["AGENT_BROADCAST_TOPIC"] == f"{spec.app_id}.broadcast"
 
 
 def test_cloud_event_and_packed_marker_inspection() -> None:

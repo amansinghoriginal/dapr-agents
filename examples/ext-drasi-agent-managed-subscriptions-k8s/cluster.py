@@ -36,6 +36,7 @@ from settings import (
     APP_ID,
     MODEL_ENV_KEYS,
     NAMESPACE,
+    OPTIONAL_AGENT_APP_IDS,
     ROUTER_APP_ID,
     ROUTER_NAMESPACE,
     ModelSettings,
@@ -399,7 +400,34 @@ def apply_secret(name: str, namespace: str, values: dict[str, str]) -> None:
     )
 
 
-def setup(env_file: Path) -> None:
+def application_component_documents(*, multi_agent: bool) -> list[dict[str, Any]]:
+    documents = [
+        document
+        for document in yaml.safe_load_all(
+            (EXAMPLE / "kubernetes" / "components.yaml").read_text()
+        )
+        if document is not None
+    ]
+    if not multi_agent:
+        return documents
+
+    scopes = [APP_ID, *OPTIONAL_AGENT_APP_IDS]
+    application_resources = {"agent-pubsub", "agent-state", "sre-agent-retries"}
+    updated = set()
+    for document in documents:
+        metadata = document["metadata"]
+        if (
+            metadata.get("namespace") == NAMESPACE
+            and metadata.get("name") in application_resources
+        ):
+            document["scopes"] = scopes
+            updated.add(metadata["name"])
+    if updated != application_resources:
+        raise DemoError("The application Component scope resources changed.")
+    return documents
+
+
+def setup(env_file: Path, *, multi_agent: bool = False) -> None:
     require_tools("docker", "git", "make", "kubectl", "k3d", "helm")
     validate_runtime_paths()
     settings = load_model_settings(env_file)
@@ -529,8 +557,11 @@ def setup(env_file: Path) -> None:
     kubectl(
         "apply",
         "-f",
-        str(EXAMPLE / "kubernetes" / "components.yaml"),
+        "-",
         namespace=None,
+        input_text=yaml.safe_dump_all(
+            application_component_documents(multi_agent=multi_agent)
+        ),
     )
     for name in ("source.yaml", "queries.yaml", "router.yaml"):
         resource_file = str(EXAMPLE / "drasi" / name)
@@ -603,12 +634,17 @@ def main() -> None:
         if (EXAMPLE / ".env").is_file()
         else REPOSITORY / ".env",
     )
+    parser.add_argument(
+        "--multi-agent",
+        action="store_true",
+        help="Configure application Components for the optional multi-agent walkthrough.",
+    )
     arguments = parser.parse_args()
     try:
         if arguments.command == "build":
             build()
         elif arguments.command == "setup":
-            setup(arguments.env_file)
+            setup(arguments.env_file, multi_agent=arguments.multi_agent)
         else:
             cleanup()
     except (DemoError, ValueError, OSError, subprocess.SubprocessError) as error:

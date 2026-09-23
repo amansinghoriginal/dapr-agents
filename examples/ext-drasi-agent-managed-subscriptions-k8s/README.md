@@ -124,6 +124,30 @@ Negative observations are checked after the matching packed input is visible in 
 
 The duplicate-observation step intentionally uses fresh workflows rather than depending on whether a repeated inbox message's workflow ID is reused or suppressed. The property being demonstrated is the destination's business identity, not a deduplication promise.
 
+## Run the optional multi-agent walkthrough
+
+The same agent image can host several independently configured applications. The optional walkthrough deploys four logical agents that share the router and application broker:
+
+| Agent | Monitoring selected through generated tools |
+|---|---|
+| `CheckoutSRE` | Newly appearing checkout server errors |
+| `CheckoutSecurityAnalyst` | The same new-error signal, with separate security handling |
+| `ReleaseGuardian` | Rollout updates, later expanded to new rollouts and updates |
+| `ErrorLifecycleAuditor` | Server errors leaving the query result |
+
+Create a fresh environment with the optional agent scopes configured before any application starts:
+
+```bash
+uv run --locked python cluster.py setup --multi-agent --env-file .env
+uv run --locked python multi_agent_demo.py
+```
+
+The walkthrough verifies that natural-language tasks create separate durable subscriptions, one event can fan out to two agents, unrelated operations remain isolated, every identity receives a distinct stable inbox, a subscription update preserves its incarnation, and all agents can independently unsubscribe.
+
+The `--multi-agent` option adds every optional agent scope while applying the application-facing Dapr Components. Do not add scopes by patching the actor state Component while the applications are running. Dapr rejects hot reload of an actor state store and can restart sidecars, which terminates existing streaming subscriptions. Recreate the reference environment after changing Component scopes.
+
+Agent identity and persona are configured with `AGENT_NAME`, `AGENT_ROLE`, `AGENT_GOAL`, `AGENT_NAMESPACE`, `DRASI_ROUTER_ID`, `AGENT_PUBSUB_NAME`, `AGENT_STATE_STORE_NAME`, `AGENT_REQUEST_TOPIC`, `AGENT_BROADCAST_TOPIC`, and `ASSESSMENT_SERVICE`. The default values preserve the original `CheckoutSRE` walkthrough.
+
 ## Why the external action is safe to repeat
 
 The agent's only business action is `record_service_assessment(status, summary)`. The service key comes from trusted application configuration (`ASSESSMENT_SERVICE=checkout`), not tool arguments or event fields. There is no model-generated idempotency token.
@@ -182,9 +206,9 @@ The pinned source checkout, built images, and build caches remain for reuse. No 
 
 ```bash
 uv sync --locked --group dev
-uv run --locked ruff format app.py actions.py settings.py cluster.py demo.py tests
-uv run --locked flake8 app.py actions.py settings.py cluster.py demo.py tests --ignore=E501,F401,W503,E203,E704
-uv run --locked mypy --config-file pyproject.toml app.py actions.py settings.py cluster.py demo.py
+uv run --locked ruff format app.py actions.py settings.py cluster.py demo.py multi_agent_demo.py tests
+uv run --locked flake8 app.py actions.py settings.py cluster.py demo.py multi_agent_demo.py tests --ignore=E501,F401,W503,E203,E704
+uv run --locked mypy --config-file pyproject.toml app.py actions.py settings.py cluster.py demo.py multi_agent_demo.py
 uv run --locked pytest tests -m "not integration"
 DEMO_TEST_POSTGRES=1 uv run --locked pytest tests/test_assessment_database.py
 ```

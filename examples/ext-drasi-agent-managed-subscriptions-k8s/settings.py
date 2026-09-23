@@ -31,7 +31,75 @@ PUBSUB_NAME = "agent-pubsub"
 STATE_STORE_NAME = "agent-state"
 ERROR_QUERY = "checkout-server-errors"
 ROLLOUT_QUERY = "checkout-rollout-status"
+OPTIONAL_AGENT_APP_IDS = (
+    "release-guardian",
+    "error-lifecycle-auditor",
+    "checkout-security-analyst",
+)
 MODEL_ENV_KEYS = ("LLM_PROVIDER", "LLM_CHAT_URL", "LLM_API_KEY", "LLM_MODEL")
+AGENT_ENV_KEYS = (
+    "AGENT_NAME",
+    "AGENT_ROLE",
+    "AGENT_GOAL",
+    "AGENT_NAMESPACE",
+    "DRASI_ROUTER_ID",
+    "AGENT_PUBSUB_NAME",
+    "AGENT_STATE_STORE_NAME",
+    "AGENT_REQUEST_TOPIC",
+    "AGENT_BROADCAST_TOPIC",
+    "ASSESSMENT_SERVICE",
+)
+
+
+class AgentSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1, pattern=r"\S")
+    role: str = Field(min_length=1, pattern=r"\S")
+    goal: str = Field(min_length=1, pattern=r"\S")
+    namespace: str = Field(min_length=1, pattern=r"\S")
+    router_id: str = Field(min_length=1, pattern=r"\S")
+    pubsub_name: str = Field(min_length=1, pattern=r"\S")
+    state_store_name: str = Field(min_length=1, pattern=r"\S")
+    request_topic: str = Field(min_length=1, pattern=r"\S")
+    broadcast_topic: str = Field(min_length=1, pattern=r"\S")
+    assessment_service: str = Field(min_length=1, pattern=r"\S")
+
+    @classmethod
+    def from_env(cls, values: Mapping[str, str] | None = None) -> "AgentSettings":
+        environment = os.environ if values is None else values
+        defaults = {
+            "AGENT_NAME": AGENT_NAME,
+            "AGENT_ROLE": "SRE assistant for the checkout service",
+            "AGENT_GOAL": (
+                "Maintain a useful service assessment and monitor requested conditions."
+            ),
+            "AGENT_NAMESPACE": NAMESPACE,
+            "DRASI_ROUTER_ID": ROUTER_ID,
+            "AGENT_PUBSUB_NAME": PUBSUB_NAME,
+            "AGENT_STATE_STORE_NAME": STATE_STORE_NAME,
+            "AGENT_REQUEST_TOPIC": "checkout-sre.requests",
+            "AGENT_BROADCAST_TOPIC": "checkout-sre.broadcast",
+            "ASSESSMENT_SERVICE": "checkout",
+        }
+        resolved = {
+            key: environment[key] if key in environment else default
+            for key, default in defaults.items()
+        }
+        return cls.model_validate(
+            {
+                "name": resolved["AGENT_NAME"],
+                "role": resolved["AGENT_ROLE"],
+                "goal": resolved["AGENT_GOAL"],
+                "namespace": resolved["AGENT_NAMESPACE"],
+                "router_id": resolved["DRASI_ROUTER_ID"],
+                "pubsub_name": resolved["AGENT_PUBSUB_NAME"],
+                "state_store_name": resolved["AGENT_STATE_STORE_NAME"],
+                "request_topic": resolved["AGENT_REQUEST_TOPIC"],
+                "broadcast_topic": resolved["AGENT_BROADCAST_TOPIC"],
+                "assessment_service": resolved["ASSESSMENT_SERVICE"],
+            }
+        )
 
 
 class ModelSettings(BaseModel):

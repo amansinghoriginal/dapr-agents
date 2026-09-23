@@ -14,8 +14,6 @@
 """A real tool-using agent; hosting does not run an initial model turn."""
 
 import logging
-import os
-
 import uvicorn
 from fastapi import FastAPI
 
@@ -30,20 +28,16 @@ from dapr_agents.storage.daprstores.stateservice import StateStoreService
 
 from actions import make_assessment_tool
 from settings import (
-    AGENT_NAME,
-    NAMESPACE,
-    PUBSUB_NAME,
-    ROUTER_ID,
-    STATE_STORE_NAME,
+    AgentSettings,
     ModelSettings,
 )
 
 
-def make_agent(settings: ModelSettings, *, service: str) -> DurableAgent:
+def make_agent(model: ModelSettings, settings: AgentSettings) -> DurableAgent:
     agent = DurableAgent(
-        name=AGENT_NAME,
-        role="SRE assistant for the checkout service",
-        goal="Maintain a useful service assessment and monitor requested conditions.",
+        name=settings.name,
+        role=settings.role,
+        goal=settings.goal,
         instructions=[
             "Use the available tools to carry out the user's operational objective.",
             "For persistent monitoring, save self-contained future handling instructions "
@@ -59,21 +53,27 @@ def make_agent(settings: ModelSettings, *, service: str) -> DurableAgent:
             "success. Report failures and unresolved subscription transitions clearly.",
         ],
         llm=OpenAIChatClient(
-            model=settings.model,
-            api_key=settings.api_key.get_secret_value(),
-            base_url=settings.base_url,
+            model=model.model,
+            api_key=model.api_key.get_secret_value(),
+            base_url=model.base_url,
             timeout=120,
         ),
-        tools=[make_assessment_tool(service)],
+        tools=[make_assessment_tool(settings.assessment_service)],
         pubsub=AgentPubSubConfig(
-            pubsub_name=PUBSUB_NAME,
-            agent_topic="checkout-sre.requests",
-            broadcast_topic="checkout-sre.broadcast",
+            pubsub_name=settings.pubsub_name,
+            agent_topic=settings.request_topic,
+            broadcast_topic=settings.broadcast_topic,
         ),
-        state=AgentStateConfig(store=StateStoreService(store_name=STATE_STORE_NAME)),
+        state=AgentStateConfig(
+            store=StateStoreService(store_name=settings.state_store_name)
+        ),
         execution=AgentExecutionConfig(max_iterations=8),
     )
-    enable_drasi_subscriptions(agent, router_id=ROUTER_ID, namespace=NAMESPACE)
+    enable_drasi_subscriptions(
+        agent,
+        router_id=settings.router_id,
+        namespace=settings.namespace,
+    )
     return agent
 
 
@@ -81,11 +81,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
-    service = os.environ.get("ASSESSMENT_SERVICE")
-    if service != "checkout":
-        raise ValueError("This reference catalog requires ASSESSMENT_SERVICE=checkout.")
 
-    agent = make_agent(ModelSettings.from_env(), service=service)
+    agent = make_agent(ModelSettings.from_env(), AgentSettings.from_env())
     runner = AgentRunner()
     application = FastAPI(title="Agent-managed Drasi reference demo")
 
