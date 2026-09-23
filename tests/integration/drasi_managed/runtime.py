@@ -29,7 +29,7 @@ from uuid import uuid4
 import httpx
 
 HERE = Path(__file__).resolve().parent
-ROUTER_REVISION = "cb959f665dbb190143161964df69edeb7013712e"
+ROUTER_REVISION = "7e3f4f2aec6574ba1f487d910315e4265670ddc8"
 CONTRACT_REVISION = "49e8df694a16520519a1ba559f99c1a13a668431"
 QUERY = "service-errors"
 OTHER_QUERY = "rollout-status"

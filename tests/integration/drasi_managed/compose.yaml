@@ -79,10 +79,10 @@ services:
   router:
     image: ${DRASI_ROUTER_IMAGE:?Set by the integration runner}
     build:
-      context: https://github.com/drasi-project/drasi-platform.git#cb959f665dbb190143161964df69edeb7013712e:reactions/dapr/agent-router
+      context: https://github.com/drasi-project/drasi-platform.git#7e3f4f2aec6574ba1f487d910315e4265670ddc8:reactions/dapr/agent-router
       dockerfile: Dockerfile.default
       additional_contexts:
-        reaction_sdk: https://github.com/drasi-project/drasi-platform.git#cb959f665dbb190143161964df69edeb7013712e:reactions/sdk/python
+        reaction_sdk: https://github.com/drasi-project/drasi-platform.git#7e3f4f2aec6574ba1f487d910315e4265670ddc8:reactions/sdk/python
     network_mode: service:router-dapr
     environment:
       routerId: drasi-integration/drasi-router

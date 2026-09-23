@@ -50,8 +50,8 @@ Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Ma
 | Local Python | Python 3.12, selected by uv |
 | PostgreSQL | `postgres:15.8-alpine3.20` |
 | Application Redis | `redis:7.4.1-alpine3.20` |
-| Platform source and CLI | [`cb959f665dbb190143161964df69edeb7013712e`](https://github.com/drasi-project/drasi-platform/tree/cb959f665dbb190143161964df69edeb7013712e) |
-| Platform images | `m2-cb959f665dbb-azure-linux`, built from that checkout and its pinned Core submodule |
+| Platform source and CLI | [`7e3f4f2aec6574ba1f487d910315e4265670ddc8`](https://github.com/drasi-project/drasi-platform/tree/7e3f4f2aec6574ba1f487d910315e4265670ddc8) |
+| Platform images | `m2-7e3f4f2aec65-azure-linux`, built from that checkout and its pinned Core submodule |
 | CLI builder | `golang:1.24.4-bookworm` |
 | Agent/router Python contract | The extension's immutable public Git dependency, resolved in this example's `uv.lock` |
 
@@ -195,4 +195,4 @@ Shared workspace registration, root lockfiles, CI, and top-level documentation a
 
 ## Prior art
 
-The application/state/pubsub layout builds on the repository's [author-configured Drasi example](../ext-drasi-change-driven-agents-k8s/README.md). The separate-broker deployment and acknowledged-input observations adapt the [Platform's pinned DaprAgentRouter end-to-end scenario](https://github.com/drasi-project/drasi-platform/tree/cb959f665dbb190143161964df69edeb7013712e/e2e-tests/11-dapr-agent-router-scenario). The catalog and service-invocation setup follow the [implemented router documentation](https://github.com/drasi-project/drasi-platform/tree/cb959f665dbb190143161964df69edeb7013712e/reactions/dapr/agent-router).
+The application/state/pubsub layout builds on the repository's [author-configured Drasi example](../ext-drasi-change-driven-agents-k8s/README.md). The separate-broker deployment and acknowledged-input observations adapt the [Platform's pinned DaprAgentRouter end-to-end scenario](https://github.com/drasi-project/drasi-platform/tree/7e3f4f2aec6574ba1f487d910315e4265670ddc8/e2e-tests/11-dapr-agent-router-scenario). The catalog and service-invocation setup follow the [implemented router documentation](https://github.com/drasi-project/drasi-platform/tree/7e3f4f2aec6574ba1f487d910315e4265670ddc8/reactions/dapr/agent-router).

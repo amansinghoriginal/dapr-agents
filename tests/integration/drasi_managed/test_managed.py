@@ -87,6 +87,45 @@ def test_catalog_tools_and_real_row_delivery(runtime: Runtime) -> None:
         assert set(call["tools"]) == set(runtime.info["tools"])
 
 
+def test_router_rejects_malformed_packed_metadata(runtime: Runtime) -> None:
+    runtime.subscribe()
+    for kind in ("change", "control"):
+        data: dict[str, Any] = {
+            "kind": kind,
+            "queryId": QUERY,
+            "sequence": 42,
+            "sourceTimeMs": 100,
+        }
+        if kind == "change":
+            data.update(
+                addedResults=[{"errorId": "invalid-metadata"}],
+                updatedResults=[],
+                deletedResults=[],
+            )
+        else:
+            data["controlSignal"] = {"kind": "running"}
+        for field in ("sequence", "sourceTimeMs"):
+            for value in (True, "42", 42.0):
+                response = runtime.request(
+                    "POST",
+                    f"{runtime.router_url}/_drasi/events/{QUERY}",
+                    json={
+                        "id": f"{kind}-{field}-{type(value).__name__}",
+                        "source": "urn:drasi:integration",
+                        "specversion": "1.0",
+                        "type": "com.dapr.event.sent",
+                        "topic": f"{QUERY}-results",
+                        "pubsubname": "drasi-inbound",
+                        "datacontenttype": "application/json",
+                        "data": {**data, field: value},
+                    },
+                )
+                assert response == {"status": "DROP"}, (kind, field, value)
+    assert runtime.stream(runtime.info["inbox"]) == []
+    assert runtime.scheduling() == []
+    assert runtime.evidence() == {"calls": [], "records": []}
+
+
 def test_updates_unsubscribe_and_incarnation_fencing(runtime: Runtime) -> None:
     original = runtime.subscribe()
     runtime.publish(201, added=[{"errorId": "before-update"}])

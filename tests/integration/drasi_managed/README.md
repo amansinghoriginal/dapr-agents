@@ -58,7 +58,7 @@ Compose is invoked with an empty environment file, and the agent build has an ex
 |---|---|
 | Dapr runtime, placement, scheduler | `1.18.4` |
 | Redis Streams and Redis state stores | `7.4.2-alpine` |
-| Built-in router and Reaction SDK | Drasi Platform revision `cb959f665dbb190143161964df69edeb7013712e` |
+| Built-in router and Reaction SDK | Drasi Platform revision `7e3f4f2aec6574ba1f487d910315e4265670ddc8` |
 | Shared Python contract | Extension's pinned revision `49e8df694a16520519a1ba559f99c1a13a668431` |
 | Agent SDK and dependencies | Repository `uv.lock`, installed with `--frozen` |
 | Agent container Python / uv | `3.12.12` / `0.11.27` |
@@ -81,6 +81,7 @@ Logs are also captured when startup fails; full artifacts are collected only aft
 | Scenario | Observable boundary |
 |---|---|
 | Startup catalog | Real MCP through Dapr invocation; shared parsing and omitted optional fields |
+| Router metadata validation | Built router rejects boolean, string, and floating-point sequence/timestamp values before publication or agent scheduling |
 | Subscribe/update/unsubscribe | Generated tools, durable agent intent, and real router rules |
 | Operation filtering | Router filters a mixed packed batch; admission also rejects a retained delivery excluded by a later filter |
 | Router and agent restart | Durable rules/instructions survive; incarnation is retained; no startup model turn |
@@ -132,4 +133,4 @@ Shared-tooling handoff to I4: pin or align mypy's automatically installed stub d
 
 ## Prior art
 
-The Compose topology, packed-change shape, and Redis acknowledgement observations follow the real-runtime tests in the [Platform router package](https://github.com/drasi-project/drasi-platform/tree/cb959f665dbb190143161964df69edeb7013712e/reactions/dapr/agent-router/tests). That Apache-2.0 implementation remains authoritative for router behavior; these tests add the composed Dapr Agents boundary.
+The Compose topology, packed-change shape, and Redis acknowledgement observations follow the real-runtime tests in the [Platform router package](https://github.com/drasi-project/drasi-platform/tree/7e3f4f2aec6574ba1f487d910315e4265670ddc8/reactions/dapr/agent-router/tests). That Apache-2.0 implementation remains authoritative for router behavior; these tests add the composed Dapr Agents boundary.
