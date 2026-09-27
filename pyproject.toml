@@ -12,7 +12,7 @@
 #
 
 [build-system]
-requires = ["setuptools>=61.0", "setuptools_scm"]
+requires = ["setuptools>=64.0", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -151,7 +151,7 @@ fallback_version = "0.0.0.dev0"
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
-testpaths = ["tests", "ext"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 markers = [

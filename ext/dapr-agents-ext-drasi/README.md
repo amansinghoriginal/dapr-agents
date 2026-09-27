@@ -121,13 +121,17 @@ From the project root:
 ```bash
 uv venv
 source .venv/bin/activate
-uv sync --active --group dev --group test --extra drasi
+uv sync --active --group dev --group test --extra drasi \
+  --config-settings-package dapr-agents:editable_mode=strict \
+  --reinstall-package dapr-agents
 ```
+
+This setup creates the core package's strict editable link tree under the repository `build/` directory. Keep it while using the environment, and repeat the setup command after adding, moving, or removing core package modules.
 
 ### Run extension tests
 
 ```bash
-uv run --group test --extra drasi pytest ext/dapr-agents-ext-drasi -m "not integration" -v
+uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration" -v
 ```
 
 ### Extension code quality

@@ -121,13 +121,17 @@ Notes:
     ```bash
     uv venv
     source .venv/bin/activate
-    uv sync --active --group dev --group test --extra drasi
+    uv sync --active --group dev --group test --extra drasi \
+      --config-settings-package dapr-agents:editable_mode=strict \
+      --reinstall-package dapr-agents
     ```
+
+    Keep the generated core package link tree under `build/` while using this environment. Repeat the setup command after adding, moving, or removing core package modules.
 
 - To run extension tests from the repo root:
 
     ```bash
-    uv run --group test --extra drasi pytest ext/dapr-agents-ext-drasi -m "not integration" -v
+    uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration" -v
     ```
 
 - Extension tests currently live in:

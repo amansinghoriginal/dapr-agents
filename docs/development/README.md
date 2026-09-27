@@ -119,19 +119,30 @@ Running `dapr version` should show the runtime as `edge`, which confirms your lo
 The project uses pytest for testing. To run tests:
 
 ```bash
+# Prepare and run the core-only suite without optional extensions
+uv sync --group test
+uv run --frozen --no-sync pytest tests -m "not integration"
+
+# Prepare the full core and extension development environment
+uv sync --group test --extra drasi \
+  --config-settings-package dapr-agents:editable_mode=strict \
+  --reinstall-package dapr-agents
+
 # Run core and extension unit tests in separate processes
-uv run --group test pytest tests -m "not integration"
-uv run --group test --extra drasi pytest ext -m "not integration"
+uv run --frozen --no-sync pytest tests -m "not integration"
+uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"
 
 # Run specific test file
-uv run pytest tests/test_random_orchestrator.py
+uv run --frozen --no-sync pytest tests/test_random_orchestrator.py
 
 # Run tests with coverage
-uv run --group test pytest tests -m "not integration" --cov=dapr_agents
-uv run --group test --extra drasi pytest ext -m "not integration" --cov=dapr_agents.ext.drasi --cov-append
+uv run --frozen --no-sync pytest tests -m "not integration" --cov=dapr_agents
+uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration" --cov=dapr_agents.ext.drasi --cov-append
 ```
 
-Keep core and extension test collection separate: core collection can hide the extension namespace and cause extension tests to skip. The Drasi extra installs the extension and its pinned router contract dependency.
+Keep core and extension test collection separate. Their `tests/conftest.py` modules have the same import identity during combined collection, and the core test harness installs process-wide Dapr SDK mocks that must not affect extension tests. The Drasi extra installs the extension and its pinned router contract dependency. Setuptools strict editable mode places the core package on the normal import path; together with the core package-path extension, this keeps core and extension imports available in either order and outside the checkout.
+
+Strict editable mode creates a core package link tree under `build/`. Keep that generated tree for as long as the virtual environment is in use. Repeat the full setup command after adding, moving, or removing core package modules so setuptools refreshes the link tree.
 
 ### Integration Tests
 
@@ -148,16 +159,16 @@ uv sync --group test
 export OPENAI_API_KEY=your_key_here
 
 # Run all integration tests
-uv run pytest tests/integration/quickstarts/ -v -m integration
+uv run --frozen --no-sync pytest tests/integration/quickstarts/ -v -m integration
 
 # Run specific test file
-uv run pytest tests/integration/quickstarts/test_01_dapr_agents_fundamentals.py -v
+uv run --frozen --no-sync pytest tests/integration/quickstarts/test_01_dapr_agents_fundamentals.py -v
 
 # Run specific test func
-uv run pytest -m integration -v tests/integration/quickstarts/test_01_dapr_agents_fundamentals.py::TestHelloWorldQuickstart::test_01_llm_client
+uv run --frozen --no-sync pytest -m integration -v tests/integration/quickstarts/test_01_dapr_agents_fundamentals.py::TestHelloWorldQuickstart::test_01_llm_client
 
 # Run with coverage
-uv run pytest tests/integration/quickstarts/ -v -m integration --cov=dapr_agents
+uv run --frozen --no-sync pytest tests/integration/quickstarts/ -v -m integration --cov=dapr_agents
 ```
 
 > Note: Parallel execution can be enabled with pytest-xdist using -n auto or -n <num>. Example: `pytest -n auto -m integration`.
@@ -200,14 +211,14 @@ uv sync --group test
 OLLAMA_ENDPOINT=http://localhost:11434/v1 \
 OLLAMA_MODEL=qwen3:0.6b \
 OPENAI_API_KEY=ollama \
-uv run pytest -m "integration and ollama" -v --timeout=300 \
+uv run --frozen --no-sync pytest -m "integration and ollama" -v --timeout=300 \
   tests/integration/quickstarts/
 
 # Run a single test (e.g., the simplest LLM client test)
 OLLAMA_ENDPOINT=http://localhost:11434/v1 \
 OLLAMA_MODEL=qwen3:0.6b \
 OPENAI_API_KEY=ollama \
-uv run pytest -m "integration and ollama" -v -k test_01_llm_client --timeout=300 \
+uv run --frozen --no-sync pytest -m "integration and ollama" -v -k test_01_llm_client --timeout=300 \
   tests/integration/quickstarts/
 ```
 
@@ -239,7 +250,7 @@ ollama pull qwen2.5:3b
 OLLAMA_ENDPOINT=http://localhost:11434/v1 \
 OLLAMA_MODEL=qwen2.5:3b \
 OPENAI_API_KEY=ollama \
-uv run pytest -m "integration and ollama" -v --timeout=300 \
+uv run --frozen --no-sync pytest -m "integration and ollama" -v --timeout=300 \
   tests/integration/quickstarts/
 ```
 
@@ -253,16 +264,16 @@ The project uses several tools to maintain code quality:
 
 ```bash
 # Run linting
-uv run flake8 dapr_agents tests --ignore=E501,F401,W503,E203,E704
+uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
 
 # Run code formatting
-uv run ruff format
+uv run --frozen --no-sync ruff format
 
 # Run type checking
-uv run mypy --config-file mypy.ini
+uv run --frozen --no-sync mypy --config-file mypy.ini
 
 ## Run all combined
-uv run ruff format && uv run flake8 dapr_agents tests --ignore=E501,F401,W503,E203,E704 && uv run mypy --config-file mypy.ini && uv run pytest tests -m "not integration"
+uv run --frozen --no-sync ruff format && uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run --frozen --no-sync mypy --config-file mypy.ini && uv run --frozen --no-sync pytest tests -m "not integration" && uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"
 ```
 
 ## Pre-Push Hooks
@@ -297,7 +308,7 @@ When you run `git push`, the following checks run automatically:
 3. **Code formatting** - Ruff auto-formats code
 4. **Linting** - Flake8 checks for code issues
 5. **Type checking** - MyPy validates types
-6. **Unit tests** - Pytest runs ~256 unit tests (excluding integration tests)
+6. **Unit tests** - Pytest runs the core and Drasi extension unit suites in separate processes
 
 These checks mirror the CI/CD pipeline, catching issues before they reach GitHub.
 
@@ -313,10 +324,11 @@ make hooks-run
 make hooks-run-all
 
 # Run individual checks (same commands as before)
-uv run ruff format dapr_agents tests
-uv run flake8 dapr_agents tests --ignore=E501,F401,W503,E203,E704
-uv run mypy --config-file mypy.ini
-uv run pytest tests -m "not integration"
+uv run --frozen --no-sync ruff format dapr_agents tests ext
+uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
+uv run --frozen --no-sync mypy --config-file mypy.ini
+uv run --frozen --no-sync pytest tests -m "not integration"
+uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"
 ```
 
 ### Skipping Hooks (Emergency Only)
@@ -332,10 +344,10 @@ git push --no-verify
 ### Troubleshooting
 
 **"Hook failed to run"**
-- Ensure dependencies are installed: `uv sync --group dev --group test`
+- Ensure dependencies are installed: `uv sync --group dev --group test --extra drasi --config-settings-package dapr-agents:editable_mode=strict --reinstall-package dapr-agents`
 
 **"Tests are failing"**
-- Run tests locally to see details: `uv run pytest tests -m "not integration" -v`
+- Run tests locally to see details: `make test`
 - Fix failing tests before pushing
 
 **"First run is slow"**
@@ -343,36 +355,38 @@ git push --no-verify
 - Subsequent runs are cached and fast (~10s)
 
 **Performance**
-- Expected runtime: 8-12 seconds (pre-push hooks only)
-- Expected runtime: 2-5 minutes (with `make hooks-run-all` including integration tests)
+- Expected runtime: 2-5 minutes for the pre-push core and extension unit suites
+- Integration tests add environment-dependent runtime when using `make hooks-run-all`
 - Only checks staged files where possible
 - Integration tests NOT included in pre-push hooks (too slow - use `make hooks-run-all` for comprehensive local check)
 
 ## Development Workflow
 
-### Option 1 - Using pip:
+### Option 1 - Using uv:
 1. Install development dependencies:
    ```bash
-   uv sync --group test
+   uv sync --group dev --group test --extra drasi \
+     --config-settings-package dapr-agents:editable_mode=strict \
+     --reinstall-package dapr-agents
    ```
 
 2. Run tests before making changes:
    ```bash
-   uv run pytest tests -m "not integration"
+   make test
    ```
 
 3. Make your changes
 
 4. Run code quality checks:
    ```bash
-   uv run flake8 dapr_agents tests --ignore=E501,F401,W503,E203,E704
-   uv run ruff format
-   uv run mypy --config-file mypy.ini
+   make format
+   make lint
+   make typecheck
    ```
 
 5. Run tests again:
    ```bash
-   uv run pytest tests -m "not integration"
+   make test
    ```
 
 6. Submit your changes

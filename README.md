@@ -139,9 +139,9 @@ Please refer to our [Dapr Community Code of Conduct](https://github.com/dapr/com
 For development setup and guidelines, see our [Development Guide](docs/development/README.md).
 
 **Quick start for contributors:**
-1. Install dependencies: `uv sync --group dev --group test`
+1. Install dependencies: `uv sync --group dev --group test --extra drasi --config-settings-package dapr-agents:editable_mode=strict --reinstall-package dapr-agents`
 2. Install pre-push hooks: `pre-commit install --hook-type pre-push`
-3. Make your changes and run tests: `uv run pytest tests -m "not integration"`
+3. Make your changes and run tests: `make test`
 4. Push your changes - hooks will run automatically
 
 ## Getting Started

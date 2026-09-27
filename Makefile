@@ -11,21 +11,35 @@
 # limitations under the License.
 #
 
+UV_RUN := uv run --frozen --no-sync
+DRASI_TESTS := ext/dapr-agents-ext-drasi/tests
+
 # Test targets
-.PHONY: test
-test:
-	@echo "Running tests..."
-	python -m pytest tests/ ext/ -v --tb=short
+.PHONY: test test-core test-extension
+test: test-core test-extension
+
+test-core:
+	@echo "Running core tests..."
+	$(UV_RUN) pytest tests -m "not integration" -v --tb=short
+
+test-extension:
+	@echo "Running Drasi extension tests..."
+	$(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v --tb=short
 
 .PHONY: test-cov
 test-cov:
 	@echo "Running tests with coverage..."
-	python -m pytest tests/ ext/ -v --cov=dapr_agents --cov-report=term-missing --cov-report=html
+	$(UV_RUN) pytest tests -m "not integration" -v --cov=dapr_agents --cov-report=
+	$(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v \
+		--cov=dapr_agents.ext.drasi --cov-append \
+		--cov-report=term-missing --cov-report=html
 
 .PHONY: test-install
 test-install:
 	@echo "Installing test dependencies..."
-	pip install -e .[test]
+	uv sync --frozen --group test --extra drasi \
+		--config-settings-package dapr-agents:editable_mode=strict \
+		--reinstall-package dapr-agents
 
 .PHONY: test-all
 test-all: test-install test-cov
@@ -53,24 +67,22 @@ hooks-run-all:
 	@echo "Step 1/2: Running pre-push hooks (format, lint, type check, unit tests)..."
 	pre-commit run --all-files --hook-stage pre-push
 	@echo "Step 2/2: Running integration tests..."
-	uv run pytest tests -m integration -v
+	$(UV_RUN) pytest tests -m integration -v
 
 .PHONY: format
 format:
 	@echo "Formatting code with ruff..."
-	uv run ruff format dapr_agents tests ext
+	$(UV_RUN) ruff format dapr_agents tests ext
 
 .PHONY: lint
 lint:
 	@echo "Linting with flake8..."
-	uv run flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
+	$(UV_RUN) flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
 
 .PHONY: typecheck
 typecheck:
 	@echo "Type checking with mypy..."
-	uv run mypy --config-file mypy.ini
+	$(UV_RUN) mypy --config-file mypy.ini
 
 .PHONY: test-unit
-test-unit:
-	@echo "Running unit tests..."
-	uv run pytest tests ext -m "not integration" -v
+test-unit: test

@@ -47,21 +47,23 @@ jobs:
       with:
         version: "latest"
     - name: Install dependencies to match uv lock file to that of CI
-      run: uv sync --frozen --group test --extra drasi
+      run: |
+        uv sync --frozen --group test --extra drasi \
+          --config-settings-package dapr-agents:editable_mode=strict
     - name: Run autoformatter
       run: |
-        uv run ruff format
+        uv run --frozen --no-sync ruff format
         statusResult=$(git status -u --porcelain)
         if [ -z "$statusResult" ]
         then
             exit 0
         else
-            echo "Source files are not formatted correctly. Run 'uv run ruff format' to autoformat."
+            echo "Source files are not formatted correctly. Run 'uv run --frozen --no-sync ruff format' to autoformat."
             exit 1
         fi
     - name: Run linter
       run: |
-        uv run flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
+        uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704
   schema-validation:
     needs: lint
     runs-on: ubuntu-latest
@@ -78,7 +80,7 @@ jobs:
     - name: Install dependencies
       run: uv sync --frozen --group test
     - name: Validate metadata schema
-      run: uv run pytest tests -m "schema" -v
+      run: uv run --frozen --no-sync pytest tests -m "schema" -v
 
   build:
     needs: lint
@@ -97,18 +99,23 @@ jobs:
       uses: astral-sh/setup-uv@v3
       with:
         version: "latest"
-    - name: Install dependencies
+    - name: Install core test dependencies
       run: |
-        uv sync --frozen --group test --extra drasi
-    - name: Check typing
-      run: |
-        uv run mypy --config-file mypy.ini
+        uv sync --frozen --group test
     - name: Run core tests
       run: |
-        uv run pytest tests -m "not integration"
+        uv run --frozen --no-sync pytest tests -m "not integration"
+    - name: Install Drasi extension test dependencies
+      run: |
+        uv sync --frozen --group test --extra drasi \
+          --config-settings-package dapr-agents:editable_mode=strict \
+          --reinstall-package dapr-agents
+    - name: Check typing
+      run: |
+        uv run --frozen --no-sync mypy --config-file mypy.ini
     - name: Run extension tests
       run: |
-        uv run --extra drasi pytest ext -m "not integration"
+        uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"
 
   package:
     needs: lint
@@ -134,10 +141,139 @@ jobs:
     - name: Verify Drasi extension wheel
       run: |
         uv export --frozen --package dapr-agents-ext-drasi --no-dev --no-emit-workspace \
-          --no-hashes --output-file dist/drasi-requirements.txt --quiet
-        uv venv .wheel-test
-        uv pip install --python .wheel-test/bin/python --no-deps \
-          -r dist/drasi-requirements.txt dist/core/*.whl dist/drasi/*.whl
+          --no-hashes --output-file dist/drasi-constraints.txt --quiet
+        uv venv .wheel-test --python "$(command -v python)"
+        uv pip install --python .wheel-test/bin/python \
+          --constraint dist/drasi-constraints.txt dist/core/*.whl
         cd /tmp
-        "$GITHUB_WORKSPACE/.wheel-test/bin/python" -I \
-          -c "from dapr_agents.ext.drasi import DrasiChangeEvent, DrasiOperation, register_drasi_trigger; from drasi_agent_router_contracts import AgentDelivery, parse_catalog"
+        "$GITHUB_WORKSPACE/.wheel-test/bin/python" -I - <<'PY'
+        import importlib.util
+        from pathlib import Path
+        import sys
+
+        import dapr_agents
+        from dapr_agents import DurableAgent
+
+        core_path = Path(dapr_agents.__file__).resolve()
+        assert core_path.is_relative_to(Path(sys.prefix).resolve()), core_path
+        assert callable(DurableAgent)
+
+        try:
+            extension_spec = importlib.util.find_spec("dapr_agents.ext.drasi")
+        except ModuleNotFoundError:
+            extension_spec = None
+        assert extension_spec is None
+        PY
+        cd "$GITHUB_WORKSPACE"
+        uv pip install --python .wheel-test/bin/python \
+          --constraint dist/drasi-constraints.txt dist/core/*.whl dist/drasi/*.whl
+        uv pip check --python .wheel-test/bin/python
+        cd /tmp
+        "$GITHUB_WORKSPACE/.wheel-test/bin/python" -I - <<'PY'
+        import json
+        import os
+        from importlib.metadata import distribution
+        from pathlib import Path
+        import sys
+        from urllib.parse import unquote, urlparse
+
+        import dapr_agents
+        import dapr_agents.ext.drasi as drasi
+        import drasi_agent_router_contracts as contracts
+        from drasi_agent_router_contracts import AgentDelivery, parse_catalog
+
+        environment = Path(sys.prefix).resolve()
+        for module in (dapr_agents, drasi, contracts):
+            module_path = Path(module.__file__).resolve()
+            assert module_path.is_relative_to(environment), module_path
+
+        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        expected_origins = {
+            "dapr-agents": workspace / "dist" / "core",
+            "dapr-agents-ext-drasi": workspace / "dist" / "drasi",
+        }
+        for package, expected_directory in expected_origins.items():
+            direct_url = distribution(package).read_text("direct_url.json")
+            assert direct_url is not None
+            origin = Path(
+                unquote(urlparse(json.loads(direct_url)["url"]).path)
+            ).resolve()
+            assert origin.parent == expected_directory, origin
+
+        required_exports = {
+            "register_drasi_trigger",
+            "enable_drasi_subscriptions",
+            "DrasiChangeEvent",
+            "DrasiOperation",
+        }
+        assert required_exports <= set(drasi.__all__)
+        for export in required_exports:
+            assert getattr(drasi, export) is not None
+        assert AgentDelivery.__module__.startswith("drasi_agent_router_contracts.")
+        assert callable(parse_catalog)
+        PY
+    - name: Reject incompatible local wheel pair
+      run: |
+        python - <<'PY'
+        import base64
+        import csv
+        import hashlib
+        import io
+        from pathlib import Path
+        import re
+        import zipfile
+
+        source = next(Path("dist/drasi").glob("*.whl"))
+        target_directory = Path("dist/drasi-incompatible")
+        target_directory.mkdir(exist_ok=True)
+        target = target_directory / source.name
+
+        entries = {}
+        with zipfile.ZipFile(source) as archive:
+            for info in archive.infolist():
+                entries[info.filename] = archive.read(info.filename)
+
+        metadata_name = next(
+            name for name in entries if name.endswith(".dist-info/METADATA")
+        )
+        metadata = entries[metadata_name].decode()
+        metadata, replacements = re.subn(
+            r"^Requires-Dist: dapr-agents.*$",
+            "Requires-Dist: dapr-agents>=999",
+            metadata,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        assert replacements == 1
+        entries[metadata_name] = metadata.encode()
+
+        record_name = next(
+            name for name in entries if name.endswith(".dist-info/RECORD")
+        )
+        rows = list(csv.reader(io.StringIO(entries[record_name].decode())))
+        metadata_record = next(row for row in rows if row[0] == metadata_name)
+        digest = base64.urlsafe_b64encode(
+            hashlib.sha256(entries[metadata_name]).digest()
+        ).rstrip(b"=").decode()
+        metadata_record[1] = f"sha256={digest}"
+        metadata_record[2] = str(len(entries[metadata_name]))
+
+        record = io.StringIO()
+        csv.writer(record, lineterminator="\n").writerows(rows)
+        entries[record_name] = record.getvalue().encode()
+
+        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, data in entries.items():
+                archive.writestr(name, data)
+        PY
+        uv venv .wheel-test-incompatible --python "$(command -v python)"
+        uv pip install --python .wheel-test-incompatible/bin/python --no-deps \
+          -r dist/drasi-constraints.txt
+        if uv pip install --offline --python .wheel-test-incompatible/bin/python \
+          dist/core/*.whl dist/drasi-incompatible/*.whl \
+          >dist/incompatible-install.log 2>&1
+        then
+          echo "Incompatible local core and extension wheels unexpectedly resolved."
+          exit 1
+        fi
+        grep -q "dapr-agents>=999" dist/incompatible-install.log

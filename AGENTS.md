@@ -21,15 +21,15 @@ limitations under the License.
 
 Git is required for the Drasi extension's pinned source dependency.
 
-- **Setup**: `uv venv && source .venv/bin/activate && uv sync --group test --extra drasi`
-- **Before commit (REQUIRED)**: `uv run ruff format && uv run flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run mypy --config-file mypy.ini && uv run --group test pytest tests -m "not integration" && uv run --group test --extra drasi pytest ext -m "not integration"`
+- **Setup**: `uv venv && source .venv/bin/activate && uv sync --active --group test --extra drasi --config-settings-package dapr-agents:editable_mode=strict --reinstall-package dapr-agents`
+- **Before commit (REQUIRED)**: `uv run --frozen --no-sync ruff format && uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run --frozen --no-sync mypy --config-file mypy.ini && uv run --frozen --no-sync pytest tests -m "not integration" && uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"`
 - **Individual checks**:
-  - Auto-format: `uv run ruff format`
-  - Lint: `uv run flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704`
-  - Type check: `uv run mypy --config-file mypy.ini`
-  - Unit tests: `uv run --group test pytest tests -m "not integration" && uv run --group test --extra drasi pytest ext -m "not integration"`
+  - Auto-format: `uv run --frozen --no-sync ruff format`
+  - Lint: `uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704`
+  - Type check: `uv run --frozen --no-sync mypy --config-file mypy.ini`
+  - Unit tests: `uv run --frozen --no-sync pytest tests -m "not integration" && uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"`
 - **Testing**:
-  - Integration tests (requires API keys): `uv run pytest tests -m integration`
+  - Integration tests (requires API keys): `uv run --frozen --no-sync pytest tests -m integration`
 
 ## Code Standards
 
@@ -91,7 +91,11 @@ Dapr Agents use semantic versioning for releasing. Prefer making changes that al
 - `agents/`, `llm/`, `workflow/` - Unit tests
 - `quickstarts/` - E2E integration tests (requires API keys: `OPENAI_API_KEY`, etc.)
 
-Extension tests live under `ext/*/tests/`. Run core and extension suites in separate pytest processes: collecting them together can hide `dapr_agents.ext` and silently skip extension tests. Select `--extra drasi` for the extension suite so its dependencies are installed.
+Extension tests live under `ext/*/tests/`. Run core and extension suites in separate pytest processes because their `tests/conftest.py` modules collide during combined collection, and the core suite installs process-wide Dapr SDK mocks that must not leak into extension verification. The Drasi development setup installs the extension extra and uses setuptools strict editable mode for the core package so both package portions resolve consistently inside and outside the checkout.
+
+For core-only work, use `uv sync --group test` and `uv run --frozen --no-sync pytest tests -m "not integration"` without selecting the Drasi extra.
+
+Strict editable mode creates the core package link tree under `build/`. Keep that tree while using the environment, and repeat the setup command after adding or removing core package modules so setuptools refreshes it.
 
 **CI** (`./.github/workflows/build.yaml`): ruff → flake8 → mypy → pytest
 - Matrix: Python 3.11, 3.12, 3.13, 3.14
@@ -100,7 +104,7 @@ Extension tests live under `ext/*/tests/`. Run core and extension suites in sepa
 ## Pull Request Rules
 
 **REQUIRED Before PR**:
-1. Run `uv run ruff format && uv run flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run mypy --config-file mypy.ini && uv run --group test pytest tests -m "not integration" && uv run --group test --extra drasi pytest ext -m "not integration"` locally - all checks must pass
+1. Run `uv run --frozen --no-sync ruff format && uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run --frozen --no-sync mypy --config-file mypy.ini && uv run --frozen --no-sync pytest tests -m "not integration" && uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"` locally - all checks must pass
 2. Use conventional commit format for PR title
 3. Update docs in `dapr/docs` repo for: API changes, new features, breaking changes, config options
    - **Not required** for internal-only changes (bug fixes, refactors, performance, tests) that don't change the public API, features, config options, or documented/observable behavior

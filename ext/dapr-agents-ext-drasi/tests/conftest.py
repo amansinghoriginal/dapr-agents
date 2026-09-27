@@ -18,23 +18,13 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from importlib.resources import files
-from pathlib import Path
 from typing import cast
 
-import dapr_agents
 import pytest
 from drasi_agent_router_contracts import AgentDelivery, ListQueriesResponse, parse
 from drasi_agent_router_contracts.models.Operation import Operation
 
-# Test-only source-checkout bootstrap: the root ``dapr_agents`` regular package
-# wins import resolution before the editable extension's PEP 420 contribution,
-# including under ``uv run --extra drasi``. Extend only that package search path
-# so these tests collect the checked-out extension; this does not mock the SDK.
-_EXTENSION_NAMESPACE = str(Path(__file__).parents[1] / "dapr_agents")
-if _EXTENSION_NAMESPACE not in dapr_agents.__path__:
-    dapr_agents.__path__.append(_EXTENSION_NAMESPACE)
-
-from dapr_agents.ext.drasi._models import (  # noqa: E402
+from dapr_agents.ext.drasi._models import (
     IntentDocument,
     SubscriptionIntent,
     SubscriptionScope,

@@ -23,25 +23,9 @@ impacting extension development in Dapr Agents.
 
 from __future__ import annotations
 
-import pytest
-
-try:
-    from dapr_agents.ext.drasi.schemas.unpacked.ChangeNotification import (
-        ChangeNotification,
-        Op,
-    )
-
-    DRASI_AVAILABLE = True
-except ImportError:
-    DRASI_AVAILABLE = False
-
-pytestmark = pytest.mark.skipif(
-    not DRASI_AVAILABLE,
-    reason=(
-        "dapr-agents-ext-drasi is not available. "
-        "To run these tests, install the extension with: "
-        "`uv sync --group test --extra drasi`"
-    ),
+from dapr_agents.ext.drasi.schemas.unpacked.ChangeNotification import (
+    ChangeNotification,
+    Op,
 )
 
 

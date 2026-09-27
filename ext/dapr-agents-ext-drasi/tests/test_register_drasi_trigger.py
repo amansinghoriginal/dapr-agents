@@ -41,29 +41,15 @@ from dapr_agents.storage.daprstores.stateservice import StateStoreService
 from dapr_agents.types.exceptions import PubSubNotAvailableError
 from dapr_agents.workflow.runners.agent import AgentRunner
 
-try:
-    from dapr_agents.ext.drasi import DrasiOperation, register_drasi_trigger
-    from dapr_agents.ext.drasi._registration import (
-        DrasiMode,
-        DrasiModeConflictError,
-        register_activation,
-    )
-    from dapr_agents.ext.drasi.activations import (
-        _DRASI_TRIGGER_DEFAULT_TASK,
-        _DRASI_TRIGGER_DEFAULT_TOPIC_PREFIX,
-    )
-
-    DRASI_AVAILABLE = True
-except ImportError:
-    DRASI_AVAILABLE = False
-
-pytestmark = pytest.mark.skipif(
-    not DRASI_AVAILABLE,
-    reason=(
-        "dapr-agents-ext-drasi is not available. "
-        "To run these tests, install the extension with: "
-        "`uv sync --group test --extra drasi`"
-    ),
+from dapr_agents.ext.drasi import DrasiOperation, register_drasi_trigger
+from dapr_agents.ext.drasi._registration import (
+    DrasiMode,
+    DrasiModeConflictError,
+    register_activation,
+)
+from dapr_agents.ext.drasi.activations import (
+    _DRASI_TRIGGER_DEFAULT_TASK,
+    _DRASI_TRIGGER_DEFAULT_TOPIC_PREFIX,
 )
 
 # ---------------------------------------------------------------------------
