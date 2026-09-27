@@ -11,10 +11,11 @@
 # limitations under the License.
 #
 
-"""Compose the real Drasi components over scripted SDK and HTTP transports."""
+"""Compose the dynamic Drasi lifecycle over scripted SDK and HTTP transports."""
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -32,26 +33,21 @@ from drasi_agent_router_contracts import (
     to_wire,
 )
 from fastapi import FastAPI
-from grpc import StatusCode
 
-from dapr_agents.agents.base import AgentBase
 from dapr_agents.agents.configs import (
     AgentExecutionConfig,
     AgentMCPConfig,
     AgentObservabilityConfig,
     AgentPubSubConfig,
+    RuntimeSubscriptionConfig,
 )
 from dapr_agents.agents.durable import DurableAgent
 from dapr_agents.ext.drasi import (
-    enable_drasi_subscriptions,
+    DrasiLifecycleError,
+    drasi_subscription_lifecycle,
     register_drasi_trigger,
 )
-from dapr_agents.ext.drasi import (
-    _registration,
-    activations,
-    router_client,
-    subscription_manager,
-)
+from dapr_agents.ext.drasi import router_client, subscription_manager, subscriptions
 from dapr_agents.ext.drasi._models import (
     IntentDocument,
     SubscriptionIntent,
@@ -60,16 +56,15 @@ from dapr_agents.ext.drasi._models import (
 from dapr_agents.ext.drasi._registration import (
     DrasiApplicationConflictError,
     DrasiModeConflictError,
-    register_activation,
 )
+from dapr_agents.ext.drasi.delivery import DrasiDeliveryError
 from dapr_agents.ext.drasi.intent_store import DaprIntentRepository
 from dapr_agents.llm import OpenAIChatClient
 from dapr_agents.tool import AgentTool
-from dapr_agents.tool.executor import AgentToolExecutor
 from dapr_agents.workflow.runners.agent import AgentRunner
 
 from .test_delivery import _Stream, _message
-from .test_intent_store import _Backend, _grpc_error, _state_config
+from .test_intent_store import _Backend, _state_config
 from .test_router_client import _Server, _subscribe_response, _success
 
 
@@ -86,11 +81,25 @@ class _Metadata:
     mcp_servers: list[str] = field(default_factory=list)
 
 
+class _RetryInbox:
+    def __init__(self) -> None:
+        self.allow_stop = False
+        self.close_calls = 0
+        self.is_stopped = False
+        self.is_closed = False
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if not self.allow_stop:
+            raise DrasiDeliveryError("The Drasi inbox consumer did not stop in time.")
+        self.is_stopped = True
+        self.is_closed = True
+
+
 @dataclass
 class _Harness:
     scope: SubscriptionScope
     agent: DurableAgent
-    runner: AgentRunner
     runtime: MagicMock
     workflow: MagicMock
     backend: _Backend
@@ -100,18 +109,42 @@ class _Harness:
     streams: list[_Stream]
     make_agent: Callable[..., DurableAgent]
     client_factory: Callable[..., MagicMock]
-    open_stream: Callable[..., _Stream]
+    mount_service_routes: Mock
+    mount_hitl_routes: Mock
 
-    @property
-    def repository(self) -> DaprIntentRepository:
-        return DaprIntentRepository(scope=self.scope, store=self.agent.state_store)
+    def scope_for(self, agent: DurableAgent | None = None) -> SubscriptionScope:
+        target = agent or self.agent
+        return SubscriptionScope(
+            router_id=self.scope.router_id,
+            namespace=self.scope.namespace,
+            app_id=target.appid,
+            agent_name=target.name,
+        )
 
-    def enable(self, *, pubsub: str | None = None) -> None:
-        enable_drasi_subscriptions(
-            self.agent,
+    def repository(self, agent: DurableAgent | None = None) -> DaprIntentRepository:
+        target = agent or self.agent
+        return DaprIntentRepository(
+            scope=self.scope_for(target), store=target.state_store
+        )
+
+    def lifecycle(
+        self,
+        *,
+        agent: DurableAgent | None = None,
+        app: FastAPI | None = None,
+        pubsub: str | None = None,
+        router_timeout_seconds: float = 30.0,
+        startup_timeout_seconds: float = 30.0,
+    ):
+        return drasi_subscription_lifecycle(
+            agent or self.agent,
+            app=app,
+            workflow_client=self.workflow,
             router_id=self.scope.router_id,
             namespace=self.scope.namespace,
             pubsub=pubsub,
+            router_timeout_seconds=router_timeout_seconds,
+            startup_timeout_seconds=startup_timeout_seconds,
         )
 
 
@@ -137,11 +170,14 @@ def harness(
     )
 
     def open_stream(**kwargs: object) -> _Stream:
+        del kwargs
+        assert any(runtime.wait_for_worker_ready.called for runtime in runtimes)
         stream = _Stream()
         streams.append(stream)
         return stream
 
     def client_factory(**kwargs: object) -> MagicMock:
+        del kwargs
         client = MagicMock(spec=DaprClient)
         client.__enter__.return_value = client
         client.get_metadata.return_value = metadata
@@ -158,9 +194,13 @@ def harness(
     )
 
     def make_agent(
-        name: str, tools: list[AgentTool], *, tool_choice: str | None = "auto"
+        name: str,
+        tools: list[AgentTool],
+        *,
+        tool_choice: str | None = "auto",
     ) -> DurableAgent:
         runtime = MagicMock(spec=WorkflowRuntime)
+        runtime.wait_for_worker_ready.return_value = True
         runtimes.append(runtime)
         monkeypatch.setattr(
             "dapr_agents.agents.durable.wf.WorkflowRuntime", lambda: runtime
@@ -186,8 +226,23 @@ def harness(
             agent_observability=AgentObservabilityConfig(enabled=False),
             mcp=AgentMCPConfig(enabled=False),
         )
+        agent._client_factory = client_factory
         agents.append(agent)
         return agent
+
+    workflow = MagicMock(spec=DaprWorkflowClient)
+    workflow.schedule_new_workflow.side_effect = lambda name, *, input, instance_id: (
+        instance_id
+    )
+
+    wire_pubsub_routes = Mock()
+    wire_http_routes = Mock()
+    mount_service_routes = Mock()
+    mount_hitl_routes = Mock()
+    monkeypatch.setattr(AgentRunner, "_wire_pubsub_routes", wire_pubsub_routes)
+    monkeypatch.setattr(AgentRunner, "_wire_http_routes", wire_http_routes)
+    monkeypatch.setattr(AgentRunner, "_mount_service_routes", mount_service_routes)
+    monkeypatch.setattr(AgentRunner, "_mount_hitl_routes", mount_hitl_routes)
 
     ordinary = AgentTool(
         name="record_assessment",
@@ -195,21 +250,10 @@ def harness(
         func=lambda: "recorded",
     )
     agent = make_agent(scope.agent_name, [ordinary])
-    workflow = MagicMock(spec=DaprWorkflowClient)
-    workflow.schedule_new_workflow.side_effect = lambda name, *, input, instance_id: (
-        instance_id
-    )
-    runner = AgentRunner(wf_client=workflow, client_factory=client_factory)
-    runner._wire_pubsub_routes = Mock()
-    runner._wire_http_routes = Mock()
-    runner._mount_service_routes = Mock()
-    runner._mount_hitl_routes = Mock()
-    runner.run_workflow_async = AsyncMock(return_value="normal-task")
     try:
         yield _Harness(
             scope=scope,
             agent=agent,
-            runner=runner,
             runtime=runtimes[0],
             workflow=workflow,
             backend=backend,
@@ -219,10 +263,10 @@ def harness(
             streams=streams,
             make_agent=make_agent,
             client_factory=client_factory,
-            open_stream=open_stream,
+            mount_service_routes=mount_service_routes,
+            mount_hitl_routes=mount_hitl_routes,
         )
     finally:
-        runner.shutdown()
         for created in agents:
             created.stop()
         for stream in streams:
@@ -231,10 +275,10 @@ def harness(
         assert all(not http.owner[0].is_alive() for http in server.clients)
 
 
-def _tool(harness: _Harness, prefix: str) -> AgentTool:
+def _tool(agent: DurableAgent, prefix: str) -> AgentTool:
     return next(
         tool
-        for tool in harness.agent.tool_executor.list_tools()
+        for tool in agent.tool_executor.list_tools()
         if tool.name.startswith(prefix)
     )
 
@@ -257,668 +301,543 @@ def _confirm_subscribe(
     )
 
 
-def test_registration_is_inert_and_startup_prepares_before_worker_execution(
-    harness: _Harness,
-) -> None:
-    agent = harness.agent
-    executor = agent.tool_executor
-    ordinary = executor.list_tools()[0]
-    prompt = agent.prompt_template
-    policy = agent.profile.system_prompt
-    store = agent.state_store
-    harness.enable()
-    assert harness.server.calls == []
-    assert harness.backend.reads == []
-    assert harness.streams == []
-    assert executor.list_tools() == [ordinary]
-
-    def starting_worker() -> None:
-        snapshot = harness.repository.load()
-        assert snapshot is not None and snapshot.etag
-        assert snapshot.document.intents == {}
-        assert len(agent.get_llm_tools()) == 6
-        assert len(harness.streams) == 1
-
-    harness.runtime.start.side_effect = starting_worker
-    harness.runner.workflow(agent)
-
-    assert agent.tool_executor is executor
-    assert executor.get_tool(ordinary.name) is ordinary
-    assert agent.prompt_template is prompt
-    assert agent.profile.system_prompt == policy
-    assert agent.state_store is store
-    agent.llm.generate.assert_not_called()
-    harness.clients[-1].subscribe.assert_called_once_with(
-        pubsub_name="application-bus",
-        topic=harness.scope.inbox_topic,
-        dead_letter_topic=harness.scope.dead_letter_topic,
-    )
-    assert [call["name"] for call in harness.server.calls] == ["list_queries"]
-    assert ordinary.run() == "recorded"
-
-
-@pytest.mark.parametrize(
-    "host", ("workflow", "subscribe", "register_routes", "serve", "run", "run_stream")
-)
 @pytest.mark.asyncio
-async def test_all_host_paths_prepare_once_and_shutdown_without_unsubscribing(
-    harness: _Harness, host: str
-) -> None:
-    harness.enable()
-    runner, agent = harness.runner, harness.agent
-    if host == "run":
-        await runner.run(agent, "Monitor health.", wait=False)
-    elif host == "run_stream":
-        consumer = MagicMock()
-        consumer.astart = AsyncMock()
-        consumer.aclose = AsyncMock()
-        consumer.__aiter__.return_value = iter(())
-        runner._resolve_default_listener = Mock(return_value={"type": "in_process"})
-        runner._build_stream_consumer = Mock(return_value=consumer)
-        assert [chunk async for chunk in runner.run_stream(agent, "Monitor.")] == []
-    elif host == "serve":
-        runner.serve(agent, app=FastAPI())
-    elif host == "register_routes":
-        runner.register_routes(agent, fastapi_app=FastAPI())
-    else:
-        getattr(runner, host)(agent)
-    runner.workflow(agent)
-    assert len(harness.streams) == 1
-    assert len(harness.server.calls) == 1
-    assert len(agent.tool_executor.list_tools()) == 6
-
-    runner.shutdown(agent)
-
-    assert harness.streams[0].closed.is_set()
-    assert len(agent.tool_executor.list_tools()) == 1
-    assert harness.repository.load() is not None
-    assert all(call["name"] != "unsubscribe" for call in harness.server.calls)
-    harness.workflow.close.assert_not_called()
-
-
-def test_real_tools_manager_store_admission_and_delivery_work_together(
-    harness: _Harness, insert_delivery: AgentDelivery
-) -> None:
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    _confirm_subscribe(harness)
-    instructions = "Record an assessment for each newly matching service error."
-    result = _tool(harness, "subscribe_service-errors_").run(
-        operations=["i", "u"], instructions=instructions
-    )
-    assert not result.isError
-    intent = harness.repository.get("service-errors")
-    assert intent is not None and intent.status == "active"
-    assert intent.instructions == instructions
-    assert "instructions" not in harness.server.calls[-1]["arguments"]
-
-    document = to_wire(insert_delivery)
-    document["subscriptionIncarnation"] = intent.incarnation
-    event = parse(AgentDelivery, document)
-    stream = harness.streams[0]
-    stream.messages.put(_message(event))
-    _, status = stream.responses.get(timeout=3)
-    assert status == TopicEventResponseStatus.success
-    call = harness.workflow.schedule_new_workflow.call_args
-    assert call.args == (harness.agent.agent_workflow_name,)
-    assert set(call.kwargs["input"]) == {"task"}
-    assert instructions in call.kwargs["input"]["task"]
-    assert "BEGIN_UNTRUSTED_DRASI_EVENT_JSON" in call.kwargs["input"]["task"]
-    assert len(call.kwargs["instance_id"]) == 70
-    assert len(harness.agent.get_llm_tools()) == 6
-    assert _tool(harness, "subscribe_rollout-status_") is not None
-    assert _tool(harness, "record_assessment").run() == "recorded"
-
-    harness.server.queue(
-        "unsubscribe", _success({"query_id": "service-errors", "removed": True})
-    )
-    assert not _tool(harness, "unsubscribe_service-errors_").run().isError
-    assert harness.repository.get("service-errors") is None
-    harness.runner.shutdown()
-    assert sum(call["name"] == "unsubscribe" for call in harness.server.calls) == 1
-
-
-@pytest.mark.parametrize("per_agent", (False, True))
-def test_shutdown_is_terminal_without_removing_durable_intent(
+async def test_lifecycle_prepares_before_hosting_and_opens_inbox_after_readiness(
     harness: _Harness,
-    active_intent: SubscriptionIntent,
-    per_agent: bool,
-) -> None:
-    harness.repository.initialize(
-        IntentDocument(
-            format_version=1,
-            scope=harness.scope,
-            intents={active_intent.query_id: active_intent},
-        )
-    )
-    harness.enable()
-    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
-    harness.runner.workflow(harness.agent)
-    harness.runner.shutdown(harness.agent if per_agent else None)
-    assert harness.repository.get(active_intent.query_id).status == "active"
-    assert harness.streams[0].closed.is_set()
-
-    with pytest.raises(RuntimeError, match="Restart the application"):
-        harness.runner.workflow(harness.agent)
-    harness.runtime.start.assert_called_once()
-    assert len(harness.streams) == 1
-    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
-    assert (
-        harness.repository.get(active_intent.query_id).incarnation
-        == active_intent.incarnation
-    )
-
-
-def test_new_process_state_recovers_with_fresh_agent_and_runner(
-    harness: _Harness,
-    active_intent: SubscriptionIntent,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    harness.repository.initialize(
-        IntentDocument(
-            format_version=1,
-            scope=harness.scope,
-            intents={active_intent.query_id: active_intent},
-        )
-    )
-    harness.enable()
-    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
-    harness.runner.workflow(harness.agent)
-    harness.runner.shutdown()
+    mcp_connected = False
+    original_list = router_client.MCPRouterClient.list_queries
 
-    # Simulate a new process while retaining only persisted backend data.
-    monkeypatch.setattr(_registration, "_APPLICATION_OWNERS", {})
-    restored = harness.make_agent(harness.scope.agent_name, [])
-    runner = AgentRunner(
-        wf_client=MagicMock(spec=DaprWorkflowClient),
-        client_factory=harness.client_factory,
-    )
-    try:
-        enable_drasi_subscriptions(
-            restored,
-            router_id=harness.scope.router_id,
-            namespace=harness.scope.namespace,
-        )
-        _confirm_subscribe(harness, incarnation=active_intent.incarnation)
-        runner.workflow(restored)
-        assert restored.runtime is not harness.agent.runtime
-        assert runner._wf_client is not harness.runner._wf_client
-        intent = harness.repository.get(active_intent.query_id)
-        assert intent is not None
-        assert intent.status == "active"
-        assert intent.incarnation == active_intent.incarnation
-        assert len(restored.get_llm_tools()) == 5
-    finally:
-        runner.shutdown()
+    async def connect_mcpservers() -> None:
+        nonlocal mcp_connected
+        mcp_connected = True
+        harness.agent._mcp_tools_connected = True
+
+    def list_queries(client):
+        assert mcp_connected
+        return original_list(client)
+
+    harness.agent.connect_mcpservers = AsyncMock(side_effect=connect_mcpservers)
+    monkeypatch.setattr(router_client.MCPRouterClient, "list_queries", list_queries)
+
+    def starting_worker() -> None:
+        snapshot = harness.repository().load()
+        assert snapshot is not None and snapshot.document.intents == {}
+        assert len(harness.agent.get_llm_tools()) == 6
+        assert harness.streams == []
+
+    harness.runtime.start.side_effect = starting_worker
+    app = FastAPI()
+    async with harness.lifecycle(app=app) as runner:
+        assert isinstance(runner, AgentRunner)
+        assert len(harness.streams) == 1
+        assert harness.runtime.wait_for_worker_ready.call_args.kwargs == {
+            "timeout": 30.0
+        }
+        harness.mount_service_routes.assert_called_once()
+        harness.mount_hitl_routes.assert_called_once()
+        assert [call["name"] for call in harness.server.calls] == ["list_queries"]
+        assert harness.clients[-1].subscribe.call_args.kwargs == {
+            "pubsub_name": "application-bus",
+            "topic": harness.scope.inbox_topic,
+            "dead_letter_topic": harness.scope.dead_letter_topic,
+        }
+
+    assert harness.clients[-1].close.called
+    assert harness.streams[0].closed.is_set()
 
 
-def test_empty_catalog_and_initially_toolless_agent_still_expose_local_inspection(
-    harness: _Harness, empty_catalog: ListQueriesResponse
+@pytest.mark.asyncio
+async def test_tools_intent_admission_and_delivery_work_together(
+    harness: _Harness,
+    insert_delivery: AgentDelivery,
 ) -> None:
-    original = harness.agent.tool_executor.list_tools()[0]
-    harness.agent.tool_executor.unregister_tool(original)
-    harness.agent.execution.tool_choice = None
-    harness.server.catalog = to_wire(empty_catalog)
-    harness.enable()
-    harness.runner.workflow(harness.agent)
+    async with harness.lifecycle():
+        _confirm_subscribe(harness)
+        instructions = "Record an assessment for each newly matching service error."
+        result = _tool(harness.agent, "subscribe_service-errors_").run(
+            operations=["i", "u"], instructions=instructions
+        )
+        assert not result.isError
+        intent = harness.repository().get("service-errors")
+        assert intent is not None and intent.status == "active"
+        assert intent.instructions == instructions
+        assert "instructions" not in harness.server.calls[-1]["arguments"]
 
-    assert harness.agent.execution.tool_choice == "auto"
-    assert harness.agent.tool_executor.get_tool_names() == ["list_drasi_subscriptions"]
-    result = _tool(harness, "list_drasi_subscriptions").run()
-    assert not result.isError
-    assert result.structuredContent == {
-        "result": {"source": "local_intent", "subscriptions": []}
-    }
-    harness.runner.shutdown()
-    assert harness.agent.tool_executor.list_tools() == []
-    assert harness.agent.execution.tool_choice is None
+        document = to_wire(insert_delivery)
+        document["subscriptionIncarnation"] = intent.incarnation
+        stream = harness.streams[0]
+        stream.messages.put(_message(parse(AgentDelivery, document)))
+        _, status = stream.responses.get(timeout=3)
+        assert status == TopicEventResponseStatus.success
+        call = harness.workflow.schedule_new_workflow.call_args
+        assert call.args == (harness.agent.agent_workflow_name,)
+        assert set(call.kwargs["input"]) == {"task"}
+        assert instructions in call.kwargs["input"]["task"]
+        assert "BEGIN_UNTRUSTED_DRASI_EVENT_JSON" in call.kwargs["input"]["task"]
+        assert _tool(harness.agent, "record_assessment").run() == "recorded"
 
 
-def test_explicit_tool_policy_and_pubsub_override_are_preserved(harness: _Harness):
-    harness.agent.execution.tool_choice = "none"
-    harness.agent._infra._pubsub = None
-    harness.enable(pubsub="override-bus")
-    harness.runner.workflow(harness.agent)
-    assert harness.agent.execution.tool_choice == "none"
-    assert (
-        harness.clients[-1].subscribe.call_args.kwargs["pubsub_name"] == "override-bus"
+@pytest.mark.asyncio
+async def test_cleanup_closes_inbox_then_drains_worker_then_closes_router(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    original_close = router_client.MCPRouterClient.close
+
+    def close_router(client) -> None:
+        order.append("router")
+        original_close(client)
+
+    monkeypatch.setattr(router_client.MCPRouterClient, "close", close_router)
+    lifecycle = harness.lifecycle()
+    async with lifecycle:
+        client = harness.clients[-1]
+        stream = harness.streams[-1]
+        client.close.side_effect = lambda: order.append("inbox-client")
+        original_stream_close = stream.close
+
+        def close_stream() -> None:
+            order.append("inbox-stream")
+            original_stream_close()
+
+        stream.close = close_stream
+        harness.runtime.shutdown.side_effect = lambda: order.append("runtime")
+
+    assert order[:2] == ["inbox-client", "inbox-stream"]
+    assert "runtime" in order
+    assert order[-1] == "router"
+    assert harness.repository().load() is not None
+    assert all(call["name"] != "unsubscribe" for call in harness.server.calls)
+
+
+@pytest.mark.asyncio
+async def test_primary_exception_and_cancellation_are_preserved(
+    harness: _Harness,
+) -> None:
+    lifecycle = harness.lifecycle()
+    with pytest.raises(ValueError, match="application failed") as failure:
+        async with lifecycle:
+            harness.clients[-1].close.side_effect = RuntimeError("close failed")
+            raise ValueError("application failed")
+    assert any("cleanup failed" in note.lower() for note in failure.value.__notes__)
+    harness.clients[-1].close.side_effect = None
+    await lifecycle.aclose()
+
+    fresh = harness.make_agent("CancellationAgent", [])
+    entered = asyncio.Event()
+
+    async def run() -> None:
+        async with harness.lifecycle(agent=fresh):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_errors_aggregate_only_without_primary(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_close = router_client.MCPRouterClient.close
+
+    def fail_router(client) -> None:
+        original_close(client)
+        raise RuntimeError("router close failed")
+
+    monkeypatch.setattr(router_client.MCPRouterClient, "close", fail_router)
+    with pytest.raises(ExceptionGroup) as failure:
+        async with harness.lifecycle():
+            harness.clients[-1].close.side_effect = RuntimeError(
+                "inbox client close failed"
+            )
+    assert len(failure.value.exceptions) == 2
+
+
+@pytest.mark.asyncio
+async def test_inbox_timeout_retains_dependent_resources_and_application_guard(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inbox = _RetryInbox()
+    monkeypatch.setattr(
+        subscriptions,
+        "subscribe_drasi_inbox",
+        lambda **kwargs: inbox,
     )
-    harness.runner.shutdown()
-    assert harness.agent.execution.tool_choice == "none"
+    lifecycle = harness.lifecycle()
+    await lifecycle.__aenter__()
+    router = lifecycle._router
+    runner = lifecycle._runner
+    contender = harness.make_agent("InboxContender", [])
+
+    with pytest.raises(DrasiDeliveryError, match="did not stop"):
+        await lifecycle.aclose()
+
+    assert lifecycle._inbox is inbox
+    assert lifecycle._runner is runner
+    assert lifecycle._router is router
+    harness.runtime.shutdown.assert_not_called()
+    assert harness.workflow.close.call_count == 0
+    with pytest.raises(DrasiApplicationConflictError, match="active"):
+        async with harness.lifecycle(agent=contender):
+            pytest.fail("Application ownership was released while inbox work remained.")
+
+    inbox.allow_stop = True
+    await lifecycle.aclose()
+    assert inbox.close_calls == 2
+    assert lifecycle._cleanup_complete
+
+    replacement = harness.make_agent("InboxReplacement", [])
+    async with harness.lifecycle(agent=replacement):
+        assert replacement.is_started
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_failure_retains_runner_router_and_guard_for_retry(
+    harness: _Harness,
+) -> None:
+    lifecycle = harness.lifecycle()
+    await lifecycle.__aenter__()
+    router = lifecycle._router
+    runner = lifecycle._runner
+    harness.runtime.shutdown.side_effect = [
+        RuntimeError("runtime shutdown failed"),
+        None,
+        None,
+    ]
+    contender = harness.make_agent("RuntimeContender", [])
+
+    with pytest.raises(RuntimeError, match="runtime shutdown failed"):
+        await lifecycle.aclose()
+
+    assert lifecycle._runner is runner
+    assert lifecycle._router is router
+    assert not lifecycle._runtime_drained
+    with pytest.raises(DrasiApplicationConflictError, match="active"):
+        async with harness.lifecycle(agent=contender):
+            pytest.fail("Application ownership was released before runtime drainage.")
+
+    await lifecycle.aclose()
+    assert lifecycle._runner is None
+    assert lifecycle._router is None
+    assert lifecycle._cleanup_complete
+
+    replacement = harness.make_agent("RuntimeReplacement", [])
+    async with harness.lifecycle(agent=replacement):
+        assert replacement.is_started
+
+
+@pytest.mark.asyncio
+async def test_worker_readiness_failure_prevents_inbox_and_cleans_resources(
+    harness: _Harness,
+) -> None:
+    harness.runtime.wait_for_worker_ready.return_value = False
+    with pytest.raises(DrasiLifecycleError, match="did not become ready"):
+        async with harness.lifecycle(startup_timeout_seconds=1.25):
+            pytest.fail("Lifecycle unexpectedly became ready.")
+
+    assert harness.runtime.wait_for_worker_ready.call_args.kwargs == {"timeout": 1.25}
+    assert harness.streams == []
+    assert harness.clients[-1].close.called
+    assert all(http.is_closed for http in harness.server.clients)
 
 
 @pytest.mark.parametrize("choice", ("none", "required", "auto"))
-def test_initially_toolless_agent_retains_its_explicit_tool_policy(
-    harness: _Harness, choice: str
+@pytest.mark.asyncio
+async def test_initially_toolless_agent_preserves_issue_819_tool_choice(
+    harness: _Harness,
+    empty_catalog: ListQueriesResponse,
+    choice: str,
 ) -> None:
-    agent = harness.make_agent("InitiallyToolless", [], tool_choice=choice)
-    inactive_choice = None if choice == "auto" else choice
-    assert agent.execution.tool_choice == inactive_choice
-    enable_drasi_subscriptions(
-        agent, router_id=harness.scope.router_id, namespace=harness.scope.namespace
-    )
-    harness.runner.workflow(agent)
-    assert agent.execution.tool_choice == choice
-    assert len(agent.get_llm_tools()) == 5
-    harness.runner.shutdown(agent)
-    assert agent.execution.tool_choice == inactive_choice
+    harness.server.catalog = to_wire(empty_catalog)
+    agent = harness.make_agent("ToollessAgent", [], tool_choice=choice)
 
-
-def test_borrowed_runtime_is_rejected_before_any_registration(harness: _Harness):
-    harness.agent._runtime_owned = False
-    with pytest.raises(ValueError, match="agent-owned workflow runtime"):
-        harness.enable()
-    assert harness.agent.pre_start_activations == []
-    harness.runtime.register_workflow.assert_not_called()
-    harness.runtime.start.assert_not_called()
-    harness.runtime.shutdown.assert_not_called()
-    assert harness.server.calls == []
-
-
-@pytest.mark.parametrize("per_agent", (False, True))
-def test_failed_inbox_cleanup_can_be_retried_without_releasing_a_live_owner(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, per_agent: bool
-) -> None:
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    stream = harness.streams[0]
-    close_stream = stream.close
-    failed = False
-
-    def close_once_fails() -> None:
-        nonlocal failed
-        if not failed:
-            failed = True
-            raise RuntimeError("injected stream close failure")
-        close_stream()
-
-    monkeypatch.setattr(stream, "close", close_once_fails)
-    client = harness.runner._dapr_client
-    with pytest.raises(ExceptionGroup, match="retry shutdown"):
-        harness.runner.shutdown(harness.agent if per_agent else None)
-
-    assert not stream.closed.is_set()
-    assert harness.scope.app_id in _registration._APPLICATION_OWNERS
-    assert len(harness.agent.get_llm_tools()) == 6
-    client.close.assert_not_called()
-    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
-        harness.runner.workflow(harness.agent)
-
-    harness.runner.shutdown(harness.agent if per_agent else None)
-
-    assert stream.closed.is_set()
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
-    client.close.assert_called_once()
-    with pytest.raises(RuntimeError, match="Restart the application"):
-        harness.runner.workflow(harness.agent)
-    assert len(harness.streams) == 1
+    async with harness.lifecycle(agent=agent):
+        expected = "auto" if choice == "auto" else choice
+        assert agent.execution.tool_choice == expected
+        assert agent.tool_executor.get_tool_names() == ["list_drasi_subscriptions"]
 
 
 @pytest.mark.parametrize("first_mode", ("static", "dynamic"))
-def test_mixed_modes_fail_in_both_orders(harness: _Harness, first_mode: str):
+def test_static_dynamic_mode_exclusion_in_both_orders(
+    harness: _Harness, first_mode: str
+) -> None:
     if first_mode == "static":
         register_drasi_trigger(harness.agent, query_id="service-errors")
         with pytest.raises(DrasiModeConflictError, match="already registered"):
-            harness.enable()
+            harness.lifecycle()
     else:
-        harness.enable()
+        harness.lifecycle()
         with pytest.raises(DrasiModeConflictError, match="already registered"):
             register_drasi_trigger(harness.agent, query_id="service-errors")
-    assert harness.server.calls == []
-    assert harness.backend.writes == []
 
 
-def test_duplicate_enablement_is_not_a_second_continuation(harness: _Harness):
-    harness.enable()
+def test_duplicate_dynamic_lifecycle_is_rejected(harness: _Harness) -> None:
+    harness.lifecycle()
     with pytest.raises(DrasiModeConflictError, match="already registered"):
-        harness.enable()
-    assert len(harness.agent.pre_start_activations) == 1
+        harness.lifecycle()
 
 
-def test_application_ownership_does_not_transfer_after_shutdown(
+@pytest.mark.asyncio
+async def test_lifecycle_closed_before_entry_cannot_start_later(
     harness: _Harness,
 ) -> None:
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    other = harness.make_agent("OtherAgent", [])
-    enable_drasi_subscriptions(
-        other, router_id=harness.scope.router_id, namespace=harness.scope.namespace
-    )
-    runner = AgentRunner(
-        wf_client=harness.workflow, client_factory=harness.client_factory
-    )
-    try:
-        with pytest.raises(RuntimeError, match="one Drasi-enabled"):
-            runner.workflow(other)
-        assert len(harness.streams) == 1
-        assert not other.is_started
-        harness.runner.shutdown(harness.agent)
-        with pytest.raises(RuntimeError, match="one Drasi-enabled"):
-            runner.workflow(other)
-        assert len(harness.streams) == 1
-    finally:
-        runner.shutdown()
+    lifecycle = harness.lifecycle()
+    await lifecycle.aclose()
 
+    with pytest.raises(DrasiLifecycleError, match="closed before entry"):
+        async with lifecycle:
+            pytest.fail("A closed lifecycle unexpectedly entered.")
 
-def test_static_application_ownership_lasts_for_the_process(
-    harness: _Harness,
-) -> None:
-    for _ in range(2):
-        register_activation(harness.agent, mode="static", callback=lambda ctx: Mock())
-    harness.runner.workflow(harness.agent)
-    closers = harness.runner._activation_closers[id(harness.agent)]
-    closers[0]()
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-    other = harness.make_agent("OtherAgent", [])
-    with pytest.raises(DrasiApplicationConflictError, match="one Drasi-enabled"):
-        _registration._claim_application(other)
-    harness.runner.shutdown()
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-
-
-@pytest.mark.parametrize("per_agent", (False, True))
-def test_runtime_shutdown_failure_keeps_live_worker_dependencies(
-    harness: _Harness, per_agent: bool
-) -> None:
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    client = harness.runner._dapr_client
-    harness.runtime.shutdown.side_effect = RuntimeError("worker still running")
-
-    with pytest.raises(RuntimeError, match="worker still running"):
-        harness.runner.shutdown(harness.agent if per_agent else None)
-
-    assert harness.agent.is_started
-    assert harness.agent in harness.runner._managed_agents
-    assert not harness.streams[0].closed.is_set()
-    assert len(harness.agent.get_llm_tools()) == 6
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-    client.close.assert_not_called()
-    harness.workflow.close.assert_not_called()
-    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
-        harness.runner.workflow(harness.agent)
-
-    harness.runtime.shutdown.side_effect = None
-    harness.runner.shutdown(harness.agent if per_agent else None)
-    assert not harness.agent.is_started
-    assert harness.streams[0].closed.is_set()
-    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
-    with pytest.raises(RuntimeError, match="Restart the application"):
-        harness.runner.workflow(harness.agent)
-
-
-def test_failed_start_and_uncertain_runtime_stop_keep_prepared_resources(
-    harness: _Harness,
-) -> None:
-    harness.enable()
-    harness.runtime.start.side_effect = RuntimeError("startup failed")
-    harness.runtime.shutdown.side_effect = RuntimeError("shutdown uncertain")
-
-    with pytest.raises(ExceptionGroup, match="startup and shutdown both failed"):
-        harness.runner.workflow(harness.agent)
-
-    assert harness.agent.is_started
-    assert harness.agent in harness.runner._managed_agents
-    assert len(harness.agent.get_llm_tools()) == 6
-    assert not harness.streams[0].closed.is_set()
-    with pytest.raises(RuntimeError, match="unfinished activation cleanup"):
-        harness.runner.workflow(harness.agent)
-
-    harness.runtime.shutdown.side_effect = None
-    harness.runner.shutdown()
-    assert harness.streams[0].closed.is_set()
-    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
-
-
-def test_historical_inbox_failure_does_not_pin_stopped_resources(
-    harness: _Harness, caplog: pytest.LogCaptureFixture
-) -> None:
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    harness.streams[0].messages.put(StopIteration())
-    assert harness.streams[0].closed.wait(timeout=3)
-
-    harness.runner.shutdown()
-
-    assert "Drasi inbox stream ended unexpectedly" in caplog.text
-    assert harness.agent.tool_executor.get_tool_names() == ["record_assessment"]
-    assert harness.runner._activation_closers == {}
-    assert harness.runner._dapr_client is None
-    assert all(not http.owner[0].is_alive() for http in harness.server.clients)
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-
-
-def test_static_cleanup_surfaces_failures_and_attempts_all_closers(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    failed = Mock(side_effect=[RuntimeError("static close failed"), None])
-    other = Mock()
-    monkeypatch.setattr(activations, "_subscribe", lambda ctx, specs: [failed, other])
-    register_drasi_trigger(harness.agent, query_id="service-errors")
-    harness.runner.workflow(harness.agent)
-
-    with pytest.raises(ExceptionGroup, match="retry shutdown"):
-        harness.runner.shutdown()
-
-    failed.assert_called_once()
-    other.assert_called_once()
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-    harness.runner.shutdown()
-    assert failed.call_count == 2
-    assert harness.runner._activation_closers == {}
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-
-
-@pytest.mark.parametrize("phase", ("catalog", "store", "inbox", "worker"))
-def test_failed_preparation_unwinds_and_requires_application_restart(
-    harness: _Harness, phase: str
-) -> None:
-    harness.agent.execution.tool_choice = None
-    harness.enable()
-    if phase == "catalog":
-        harness.server.initialization_error = 503
-    elif phase == "store":
-        harness.backend.read_error = _grpc_error(StatusCode.UNAVAILABLE)
-    elif phase == "worker":
-        harness.runtime.start.side_effect = RuntimeError("worker unavailable")
-    else:
-        original_factory = harness.runner._client_factory
-
-        def failing_factory():
-            client = original_factory()
-            client.subscribe.side_effect = RuntimeError("subscription failed")
-            return client
-
-        harness.runner._client_factory = failing_factory
-
-    error = "worker unavailable" if phase == "worker" else "failed during hosting"
-    with pytest.raises(RuntimeError, match=error):
-        harness.runner.workflow(harness.agent)
-    if phase == "worker":
-        harness.runtime.shutdown.assert_called_once()
-    else:
-        harness.runtime.start.assert_not_called()
-    assert not harness.agent.is_started
-    assert len(harness.agent.tool_executor.list_tools()) == 1
-    assert harness.agent.execution.tool_choice is None
-    assert _registration._APPLICATION_OWNERS[harness.scope.app_id] is harness.agent
-    assert all(not http.owner[0].is_alive() for http in harness.server.clients)
-    assert all(call["name"] != "unsubscribe" for call in harness.server.calls)
-
-    harness.server.initialization_error = None
-    harness.backend.read_error = None
-    harness.runtime.start.side_effect = None
-    harness.runner._client_factory = harness.client_factory
-    if harness.runner._dapr_client is not None:
-        harness.runner._dapr_client.subscribe.side_effect = harness.open_stream
-    with pytest.raises(RuntimeError, match="Restart the application"):
-        harness.runner.workflow(harness.agent)
-    assert not harness.agent.is_started
-
-
-def test_partial_tool_attachment_is_rolled_back(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    executor = harness.agent.tool_executor
-    register = AgentToolExecutor.register_tool
-    attempts = 0
-
-    def fail_second(target: AgentToolExecutor, tool: AgentTool) -> None:
-        nonlocal attempts
-        if target is executor:
-            attempts += 1
-            if attempts == 2:
-                raise RuntimeError("second registration failed")
-        register(target, tool)
-
-    harness.enable()
-    with monkeypatch.context() as patch:
-        patch.setattr(AgentToolExecutor, "register_tool", fail_second)
-        with pytest.raises(RuntimeError, match="second registration failed"):
-            harness.runner.workflow(harness.agent)
-    assert executor.get_tool_names() == ["record_assessment"]
+    harness.runtime.start.assert_not_called()
+    harness.runtime.shutdown.assert_not_called()
     assert harness.streams == []
-    assert all(not http.owner[0].is_alive() for http in harness.server.clients)
-    with pytest.raises(RuntimeError, match="Restart the application"):
-        harness.runner.workflow(harness.agent)
-    assert executor.get_tool_names() == ["record_assessment"]
-
-
-def test_tool_name_collision_is_detected_before_state_or_router_mutation(
-    harness: _Harness,
-) -> None:
-    ordinary = AgentTool(
-        name="LIST DRASI SUBSCRIPTIONS",
-        description="A conflicting ordinary tool.",
-        func=lambda: "ordinary",
-    )
-    harness.agent.tool_executor.register_tool(ordinary)
-    harness.enable()
-    with pytest.raises(RuntimeError, match="conflicts with an existing tool"):
-        harness.runner.workflow(harness.agent)
-    assert harness.backend.writes == []
-    assert [call["name"] for call in harness.server.calls] == ["list_queries"]
-    assert harness.agent.tool_executor.get_tool(ordinary.name) is ordinary
-    assert harness.streams == []
-
-
-@pytest.mark.parametrize(
-    "missing",
-    (
-        "state",
-        "bus",
-        "identity",
-        "namespace",
-        "router",
-        "port",
-        "executor",
-        "orchestrator",
-    ),
-)
-def test_invalid_registration_does_not_claim_mode(
-    harness: _Harness, missing: str
-) -> None:
-    router_id, namespace, port = harness.scope.router_id, harness.scope.namespace, 3500
-    if missing == "state":
-        harness.agent._infra.state_store = None
-    elif missing == "bus":
-        harness.agent._infra._pubsub = None
-    elif missing == "identity":
-        harness.agent.appid = None
-    elif missing == "namespace":
-        namespace = ""
-    elif missing == "router":
-        router_id = "not-a-scoped-router"
-    elif missing == "port":
-        port = 0
-    elif missing == "executor":
-        harness.agent.executor = Mock()
-    else:
-        harness.agent._orchestration_strategy = Mock()
-    with pytest.raises(ValueError):
-        enable_drasi_subscriptions(
-            harness.agent,
-            router_id=router_id,
-            namespace=namespace,
-            dapr_http_port=port,
-        )
-    assert harness.agent.pre_start_activations == []
-    assert not hasattr(harness.agent, "_dapr_agents_ext_drasi_mode")
     assert harness.server.calls == []
 
 
-@pytest.mark.parametrize("topic", ("inbox_topic", "dead_letter_topic"))
-def test_derived_topic_must_not_collide_with_framework_topics(
-    harness: _Harness, topic: str
+@pytest.mark.asyncio
+async def test_dynamic_application_guard_is_active_only_for_open_context(
+    harness: _Harness,
 ) -> None:
-    harness.agent._infra._pubsub.agent_topic = getattr(harness.scope, topic)
-    with pytest.raises(ValueError, match="distinct"):
-        harness.enable()
+    second = harness.make_agent("SecondAgent", [])
+    async with harness.lifecycle():
+        with pytest.raises(DrasiApplicationConflictError, match="active"):
+            async with harness.lifecycle(agent=second):
+                pytest.fail("Second lifecycle unexpectedly became active.")
+
+    third = harness.make_agent("ThirdAgent", [])
+    async with harness.lifecycle(agent=third):
+        assert third.is_started
+
+
+@pytest.mark.asyncio
+async def test_collision_fails_before_intent_mutation_or_hosting(
+    harness: _Harness,
+) -> None:
+    harness.agent.tool_executor.register_tool(
+        AgentTool(
+            name="LIST DRASI SUBSCRIPTIONS",
+            description="Conflicting author tool.",
+            func=lambda: None,
+        )
+    )
+    with pytest.raises(ValueError, match="conflicts with an existing tool"):
+        async with harness.lifecycle():
+            pytest.fail("Lifecycle unexpectedly became ready.")
+
+    assert harness.backend.writes == []
+    assert harness.runtime.start.call_count == 0
+    assert harness.streams == []
+
+
+@pytest.mark.parametrize("restriction", ("configuration", "activation"))
+def test_minimal_dynamic_profile_restrictions(
+    harness: _Harness, restriction: str
+) -> None:
+    if restriction == "configuration":
+        harness.agent.configuration = RuntimeSubscriptionConfig(store_name="config")
+        expected = "RuntimeSubscriptionConfig"
+    else:
+        harness.agent.add_activation(lambda context: None)
+        expected = "activation callbacks"
+
+    with pytest.raises(ValueError, match=expected):
+        harness.lifecycle()
+    assert harness.server.calls == []
+    assert harness.backend.writes == []
+
+
+@pytest.mark.parametrize("mutation", ("configuration", "activation", "started"))
+@pytest.mark.asyncio
+async def test_profile_is_revalidated_between_construction_and_entry(
+    harness: _Harness,
+    mutation: str,
+) -> None:
+    lifecycle = harness.lifecycle()
+    if mutation == "configuration":
+        harness.agent.configuration = RuntimeSubscriptionConfig(store_name="config")
+        expected = "RuntimeSubscriptionConfig"
+    elif mutation == "activation":
+        harness.agent.add_activation(lambda context: None)
+        expected = "activation callbacks"
+    else:
+        harness.agent._started = True
+        expected = "hosted or started"
+
+    with pytest.raises(ValueError, match=expected):
+        await lifecycle.__aenter__()
+    assert harness.server.calls == []
+    assert harness.backend.writes == []
+
+
+@pytest.mark.parametrize("mutation", ("configuration", "activation", "started"))
+@pytest.mark.asyncio
+async def test_profile_is_revalidated_after_mcp_discovery(
+    harness: _Harness,
+    mutation: str,
+) -> None:
+    lifecycle = harness.lifecycle()
+
+    async def mutate_during_mcp() -> None:
+        if mutation == "configuration":
+            harness.agent.configuration = RuntimeSubscriptionConfig(store_name="config")
+        elif mutation == "activation":
+            harness.agent.add_activation(lambda context: None)
+        else:
+            harness.agent._started = True
+        harness.agent._mcp_tools_connected = True
+
+    harness.agent.connect_mcpservers = AsyncMock(side_effect=mutate_during_mcp)
+    expected = {
+        "configuration": "RuntimeSubscriptionConfig",
+        "activation": "activation callbacks",
+        "started": "hosted or started",
+    }[mutation]
+
+    with pytest.raises(ValueError, match=expected):
+        await lifecycle.__aenter__()
+    assert harness.server.calls == []
+    assert harness.backend.writes == []
+
+
+@pytest.mark.asyncio
+async def test_profile_and_config_are_revalidated_after_catalog_before_mutation(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle = harness.lifecycle()
+    original_list = router_client.MCPRouterClient.list_queries
+
+    def mutate_after_catalog(client):
+        catalog = original_list(client)
+        harness.agent.add_activation(lambda context: None)
+        return catalog
+
+    monkeypatch.setattr(
+        router_client.MCPRouterClient,
+        "list_queries",
+        mutate_after_catalog,
+    )
+    with pytest.raises(ValueError, match="activation callbacks"):
+        await lifecycle.__aenter__()
+    assert harness.backend.writes == []
+    assert harness.runtime.start.call_count == 0
 
 
 @pytest.mark.parametrize("missing", ("pubsub", "state", "sidecar_identity"))
-def test_missing_or_mismatched_sidecar_configuration_fails_before_catalog(
+@pytest.mark.asyncio
+async def test_missing_or_mismatched_sidecar_configuration_fails_before_catalog(
     harness: _Harness, missing: str
 ) -> None:
-    harness.enable()
     if missing == "sidecar_identity":
         harness.metadata.application_id = "another-app"
+    elif missing == "pubsub":
+        harness.metadata.registered_components = [
+            component
+            for component in harness.metadata.registered_components
+            if not component.type.startswith("pubsub.")
+        ]
     else:
         harness.metadata.registered_components = [
             component
             for component in harness.metadata.registered_components
-            if not component.type.startswith(missing + ".")
+            if not component.type.startswith("state.")
         ]
-    with pytest.raises(RuntimeError, match="failed during hosting"):
-        harness.runner.workflow(harness.agent)
+
+    with pytest.raises((ValueError, DrasiLifecycleError)):
+        async with harness.lifecycle():
+            pytest.fail("Lifecycle unexpectedly became ready.")
     assert harness.server.calls == []
     assert harness.backend.writes == []
-    harness.runtime.start.assert_not_called()
 
 
-def test_configuration_changes_applied_at_start_are_checked_before_worker_execution(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.asyncio
+async def test_post_host_configuration_change_is_detected_before_inbox(
+    harness: _Harness,
 ) -> None:
-    harness.enable()
-
-    def load_changed_configuration(agent: AgentBase) -> None:
-        agent._infra._pubsub.pubsub_name = "override-bus"
-
-    monkeypatch.setattr(AgentBase, "start", load_changed_configuration)
-    with pytest.raises(RuntimeError, match="changed after registration"):
-        harness.runner.workflow(harness.agent)
-    harness.runtime.start.assert_not_called()
-    assert harness.server.calls == []
+    harness.runtime.start.side_effect = lambda: setattr(
+        harness.agent.state_store, "store_name", "changed-store"
+    )
+    with pytest.raises(DrasiLifecycleError, match="changed during startup"):
+        async with harness.lifecycle():
+            pytest.fail("Lifecycle unexpectedly became ready.")
+    assert harness.streams == []
 
 
-@pytest.mark.parametrize("hosted", (False, True))
-def test_late_enablement_is_rejected(harness: _Harness, hosted: bool) -> None:
-    if hosted:
-        harness.runner.workflow(harness.agent)
-    else:
-        harness.agent.start()
-    with pytest.raises(ValueError, match="before the agent is hosted or started"):
-        harness.enable()
-    assert harness.agent.pre_start_activations == []
+@pytest.mark.asyncio
+async def test_pubsub_and_router_timeout_overrides_are_applied(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+    original_init = router_client.MCPRouterClient.__init__
+
+    def init(client, config, *, timeout_seconds=30.0):
+        observed.append(timeout_seconds)
+        original_init(client, config, timeout_seconds=timeout_seconds)
+
+    monkeypatch.setattr(router_client.MCPRouterClient, "__init__", init)
+    async with harness.lifecycle(pubsub="override-bus", router_timeout_seconds=4.5):
+        assert harness.clients[-1].subscribe.call_args.kwargs["pubsub_name"] == (
+            "override-bus"
+        )
+    assert observed == [4.5]
 
 
-def test_unavailable_intent_recovery_guidance_reaches_the_generated_tool(
-    harness: _Harness, active_intent: SubscriptionIntent
+@pytest.mark.asyncio
+async def test_lifecycle_is_one_shot_and_fresh_objects_recover_persisted_intent(
+    harness: _Harness,
+    active_intent: SubscriptionIntent,
+) -> None:
+    harness.repository().initialize(
+        IntentDocument(
+            format_version=1,
+            scope=harness.scope,
+            intents={active_intent.query_id: active_intent},
+        )
+    )
+    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
+    lifecycle = harness.lifecycle()
+    async with lifecycle:
+        pass
+    with pytest.raises(DrasiLifecycleError, match="one-shot"):
+        async with lifecycle:
+            pytest.fail("Stopped lifecycle unexpectedly restarted.")
+
+    restored = harness.make_agent(harness.scope.agent_name, [])
+    _confirm_subscribe(harness, incarnation=active_intent.incarnation)
+    async with harness.lifecycle(agent=restored):
+        intent = harness.repository(restored).get(active_intent.query_id)
+        assert intent is not None
+        assert intent.incarnation == active_intent.incarnation
+
+
+@pytest.mark.asyncio
+async def test_unavailable_intent_guidance_reaches_generated_tool(
+    harness: _Harness,
+    active_intent: SubscriptionIntent,
 ) -> None:
     unavailable = active_intent.model_copy(update={"status": "unavailable"}, deep=True)
-    harness.repository.initialize(
+    harness.repository().initialize(
         IntentDocument(
             format_version=1,
             scope=harness.scope,
             intents={unavailable.query_id: unavailable},
         )
     )
-    harness.enable()
-    harness.runner.workflow(harness.agent)
-    result = _tool(harness, "subscribe_service-errors_").run(
-        operations=["i"], instructions="Monitor again."
-    )
-    assert result.isError
-    assert "unsubscribe first, then subscribe again" in result.content[0].text
-    assert all(call["name"] != "subscribe" for call in harness.server.calls)
+    async with harness.lifecycle():
+        result = _tool(harness.agent, "subscribe_service-errors_").run(
+            operations=["i"], instructions="Monitor again."
+        )
+        assert result.isError
+        assert "unsubscribe first, then subscribe again" in result.content[0].text
+        assert all(call["name"] != "subscribe" for call in harness.server.calls)

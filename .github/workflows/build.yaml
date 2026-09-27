@@ -202,7 +202,9 @@ jobs:
 
         required_exports = {
             "register_drasi_trigger",
-            "enable_drasi_subscriptions",
+            "drasi_subscription_lifecycle",
+            "DrasiSubscriptionLifecycle",
+            "DrasiLifecycleError",
             "DrasiChangeEvent",
             "DrasiOperation",
         }

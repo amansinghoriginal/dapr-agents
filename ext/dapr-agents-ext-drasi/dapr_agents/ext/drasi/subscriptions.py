@@ -11,27 +11,37 @@
 # limitations under the License.
 #
 
-"""Lifecycle composition for agent-managed Drasi subscriptions."""
+"""One-shot lifecycle composition for agent-managed Drasi subscriptions."""
 
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack
+import math
+from contextlib import AbstractAsyncContextManager
+from types import TracebackType
 from typing import Callable, NoReturn
 
+from dapr.clients import DaprClient
 from dapr.clients.exceptions import DaprInternalError
 from dapr.conf import settings
+from dapr.ext.workflow import DaprWorkflowClient
+from fastapi import FastAPI
 from grpc import RpcError
 from pydantic import ValidationError
 
 from dapr_agents.agents.durable import DurableAgent
 from dapr_agents.storage.daprstores.stateservice import StateStoreService
-from dapr_agents.types.activation import ActivationContext
+from dapr_agents.workflow.runners.agent import AgentRunner
 
 from ._models import IntentDocument, ResolvedDrasiConfig, SubscriptionScope
-from ._registration import register_activation
+from ._registration import (
+    claim_dynamic_application,
+    claim_dynamic_mode,
+    validate_claimed_dynamic_mode,
+    validate_dynamic_mode,
+)
 from .admission import DrasiAdmissionHandler
-from .delivery import subscribe_drasi_inbox
+from .delivery import DrasiInbox, subscribe_drasi_inbox
 from .intent_store import DaprIntentRepository
 from .router_client import MCPRouterClient
 from .subscription_manager import DrasiSubscriptionManager
@@ -40,9 +50,45 @@ from .subscription_tools import build_subscription_tools
 logger = logging.getLogger(__name__)
 
 
+class DrasiLifecycleError(RuntimeError):
+    """Agent-managed Drasi lifecycle setup or cleanup failed."""
+
+
 def _invalid(message: str) -> NoReturn:
     logger.error("%s", message)
     raise ValueError(message)
+
+
+def _validate_supported_profile(agent: DurableAgent) -> None:
+    if not isinstance(agent, DurableAgent):
+        _invalid("Agent-managed Drasi subscriptions require a DurableAgent.")
+    if agent.is_started:
+        _invalid("Create the Drasi lifecycle before the agent is hosted or started.")
+    if agent.configuration is not None:
+        _invalid(
+            "Agent-managed Drasi subscriptions do not yet support "
+            "RuntimeSubscriptionConfig. Construct the agent without configuration=."
+        )
+    if agent.activations:
+        _invalid(
+            "Agent-managed Drasi subscriptions do not yet support pre-existing "
+            "activation callbacks on the same agent."
+        )
+    if agent.executor is not None or agent.orchestrator or agent.llm is None:
+        _invalid(
+            "Agent-managed Drasi subscriptions require the ordinary DurableAgent "
+            "chat/tool loop, not executor= or orchestration mode."
+        )
+
+
+def _validate_new_agent(agent: DurableAgent) -> None:
+    validate_dynamic_mode(agent)
+    _validate_supported_profile(agent)
+
+
+def _validate_claimed_agent(agent: DurableAgent) -> None:
+    validate_claimed_dynamic_mode(agent)
+    _validate_supported_profile(agent)
 
 
 def _resolve_config(
@@ -53,16 +99,6 @@ def _resolve_config(
     pubsub: str | None,
     dapr_http_port: int | None,
 ) -> tuple[ResolvedDrasiConfig, StateStoreService]:
-    if agent.executor is not None or agent.orchestrator or agent.llm is None:
-        _invalid(
-            "Agent-managed Drasi subscriptions require the ordinary DurableAgent "
-            "chat/tool loop, not executor= or orchestration mode."
-        )
-    if not agent._runtime_owned:
-        _invalid(
-            "Agent-managed Drasi subscriptions require an agent-owned workflow "
-            "runtime. Omit runtime= and let AgentRunner manage its lifetime."
-        )
     store = agent.state_store
     if not isinstance(store, StateStoreService):
         _invalid(
@@ -114,20 +150,18 @@ def _resolve_config(
     return config, store
 
 
-def _check_sidecar(context: ActivationContext, config: ResolvedDrasiConfig) -> None:
+def _check_sidecar(client: DaprClient, config: ResolvedDrasiConfig) -> None:
     try:
-        metadata = context.dapr_client.get_metadata()
+        metadata = client.get_metadata()
     except (RpcError, DaprInternalError, OSError) as error:
         logger.error(
             "Drasi sidecar metadata retrieval failed (%s).", type(error).__name__
         )
-        raise RuntimeError(
+        raise DrasiLifecycleError(
             "Could not read Dapr metadata during Drasi preparation."
         ) from None
     if metadata.application_id != config.scope.app_id:
-        _invalid(
-            "The hosting runner's Dapr application identity does not match the agent."
-        )
+        _invalid("The Dapr sidecar application identity does not match the agent.")
     components = {
         component.name: component.type for component in metadata.registered_components
     }
@@ -139,67 +173,123 @@ def _check_sidecar(context: ActivationContext, config: ResolvedDrasiConfig) -> N
             _invalid(f"Required Drasi {kind[:-1]} component {name!r} is not loaded.")
 
 
-def enable_drasi_subscriptions(
-    agent: DurableAgent,
-    *,
-    router_id: str,
-    namespace: str,
-    pubsub: str | None = None,
-    dapr_http_port: int | None = None,
-) -> None:
-    """Enable persistent, agent-selected subscriptions before hosting an agent.
-
-    ``router_id`` is the router's ``<namespace>/<app-id>`` identity. ``namespace``
-    is the subscriber application's namespace; the application ID and exact
-    logical name come from the agent. Pub/Sub defaults to the agent's bus, and
-    the local sidecar HTTP port defaults to the Dapr SDK setting.
-
-    Registration performs no network I/O. AgentRunner completes preparation,
-    reconciliation, tool attachment and inbox subscription before starting the
-    workflow worker. Shutdown closes runtime resources and detaches only these
-    tools, preserving durable intent and router rules.
-    """
-    if not isinstance(agent, DurableAgent):
-        _invalid("Drasi subscriptions require a DurableAgent.")
-    if agent.is_started or not agent._activation_window_open:
-        _invalid("Enable Drasi subscriptions before the agent is hosted or started.")
-    config, store = _resolve_config(
-        agent,
-        router_id=router_id,
-        namespace=namespace,
-        pubsub=pubsub,
-        dapr_http_port=dapr_http_port,
-    )
-
-    def prepare(context: ActivationContext) -> Callable[[], None]:
-        current_config, current_store = _resolve_config(
-            agent,
-            router_id=router_id,
-            namespace=namespace,
-            pubsub=pubsub,
-            dapr_http_port=dapr_http_port,
+def _add_cleanup_notes(primary: BaseException, errors: list[Exception]) -> None:
+    for error in errors:
+        logger.error(
+            "Drasi lifecycle cleanup failed (%s).",
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
         )
-        if current_config != config or current_store is not store:
-            _invalid(
-                "Drasi identity or infrastructure changed after registration. "
-                "Configure a new agent before hosting it."
-            )
-        _check_sidecar(context, config)
+        primary.add_note(
+            f"Drasi lifecycle cleanup failed: {type(error).__name__}: {error}"
+        )
 
-        with ExitStack() as resources:
-            router = MCPRouterClient(config)
-            resources.callback(router.close)
-            catalog = router.list_queries()
+
+class DrasiSubscriptionLifecycle(AbstractAsyncContextManager[AgentRunner]):
+    """Prepare, host, and close one dynamic Drasi-enabled agent lifecycle.
+
+    The caller must supply a fresh ``DurableAgent`` constructed without
+    ``runtime=`` and must not share or replace its workflow runtime. Current
+    public Dapr Agents APIs do not expose runtime ownership for mechanical
+    verification.
+    """
+
+    def __init__(
+        self,
+        agent: DurableAgent,
+        *,
+        router_id: str,
+        namespace: str,
+        app: FastAPI | None = None,
+        workflow_client: DaprWorkflowClient | None = None,
+        pubsub: str | None = None,
+        dapr_http_port: int | None = None,
+        router_timeout_seconds: float = 30.0,
+        startup_timeout_seconds: float = 30.0,
+    ) -> None:
+        _validate_new_agent(agent)
+        if not math.isfinite(startup_timeout_seconds) or startup_timeout_seconds <= 0:
+            _invalid("startup_timeout_seconds must be finite and positive.")
+
+        claim_dynamic_mode(agent)
+        self._agent = agent
+        self._router_id = router_id
+        self._namespace = namespace
+        self._app = app
+        self._workflow_client = workflow_client
+        self._pubsub = pubsub
+        self._dapr_http_port = dapr_http_port
+        self._router_timeout_seconds = router_timeout_seconds
+        self._startup_timeout_seconds = startup_timeout_seconds
+
+        self._runner: AgentRunner | None = None
+        self._runner_dapr_clients: list[DaprClient] = []
+        self._router: MCPRouterClient | None = None
+        self._inbox_client: DaprClient | None = None
+        self._inbox: DrasiInbox | None = None
+        self._release_application: Callable[[], None] | None = None
+        self._hosting_attempted = False
+        self._attempted = False
+        self._runner_unwired = False
+        self._runtime_drained = False
+        self._cleanup_complete = False
+
+    async def __aenter__(self) -> AgentRunner:
+        if self._attempted:
+            raise DrasiLifecycleError(
+                "This Drasi lifecycle is one-shot; create fresh agent and runner objects."
+            )
+        if self._cleanup_complete:
+            raise DrasiLifecycleError(
+                "This Drasi lifecycle was closed before entry; create fresh agent "
+                "and runner objects."
+            )
+        self._attempted = True
+        try:
+            _validate_claimed_agent(self._agent)
+            await self._agent.connect_mcpservers()
+            _validate_claimed_agent(self._agent)
+            config, store = _resolve_config(
+                self._agent,
+                router_id=self._router_id,
+                namespace=self._namespace,
+                pubsub=self._pubsub,
+                dapr_http_port=self._dapr_http_port,
+            )
+            self._release_application = claim_dynamic_application(self._agent)
+
+            self._inbox_client = self._agent.client_factory()
+            _check_sidecar(self._inbox_client, config)
+
+            self._router = MCPRouterClient(
+                config, timeout_seconds=self._router_timeout_seconds
+            )
+            catalog = self._router.list_queries()
             repository = DaprIntentRepository(scope=config.scope, store=store)
-            manager = DrasiSubscriptionManager(repository=repository, router=router)
+            manager = DrasiSubscriptionManager(
+                repository=repository, router=self._router
+            )
             tools = build_subscription_tools(catalog, manager)
-            executor = agent.tool_executor
+            executor = self._agent.tool_executor
             for tool in tools:
                 if executor.get_tool(tool.name) is not None:
                     _invalid(
                         f"Drasi tool {tool.name!r} conflicts with an existing tool. "
-                        "Rename the existing tool before enabling subscriptions."
+                        "Rename the existing tool before starting the lifecycle."
                     )
+
+            _validate_claimed_agent(self._agent)
+            current_config, current_store = _resolve_config(
+                self._agent,
+                router_id=self._router_id,
+                namespace=self._namespace,
+                pubsub=self._pubsub,
+                dapr_http_port=self._dapr_http_port,
+            )
+            if current_config != config or current_store is not store:
+                raise DrasiLifecycleError(
+                    "Drasi identity or infrastructure changed during preparation."
+                )
 
             if repository.load() is None:
                 repository.initialize(
@@ -209,33 +299,207 @@ def enable_drasi_subscriptions(
 
             for tool in tools:
                 executor.register_tool(tool)
-                resources.callback(executor.unregister_tool, tool)
-            if agent.execution.tool_choice is None:
-                choice = agent._initial_tool_choice
-                attached_choice = choice if choice is not None else "auto"
-                agent.execution.tool_choice = attached_choice
+            if tools and self._agent.execution.tool_choice is None:
+                self._agent.execution.tool_choice = "auto"
 
-                def restore_tool_choice() -> None:
-                    if agent.execution.tool_choice == attached_choice:
-                        agent.execution.tool_choice = None
+            def runner_client_factory() -> DaprClient:
+                client = self._agent.client_factory()
+                self._runner_dapr_clients.append(client)
+                return client
 
-                resources.callback(restore_tool_choice)
+            self._runner = AgentRunner(
+                wf_client=self._workflow_client,
+                client_factory=runner_client_factory,
+            )
+            self._hosting_attempted = True
+            if self._app is None:
+                self._runner.workflow(self._agent)
+            else:
+                self._runner.serve(self._agent, app=self._app)
+
+            if not self._agent.runtime.wait_for_worker_ready(
+                timeout=self._startup_timeout_seconds
+            ):
+                raise DrasiLifecycleError(
+                    "The Dapr workflow worker did not become ready before the "
+                    "Drasi startup deadline."
+                )
+
+            current_config, current_store = _resolve_config(
+                self._agent,
+                router_id=self._router_id,
+                namespace=self._namespace,
+                pubsub=self._pubsub,
+                dapr_http_port=self._dapr_http_port,
+            )
+            if current_config != config or current_store is not store:
+                raise DrasiLifecycleError(
+                    "Drasi identity or infrastructure changed during startup."
+                )
+            if any(executor.get_tool(tool.name) is not tool for tool in tools):
+                raise DrasiLifecycleError(
+                    "The generated Drasi tool registrations changed during startup."
+                )
 
             admission = DrasiAdmissionHandler(scope=config.scope, intents=repository)
-            close_inbox = subscribe_drasi_inbox(
+            self._inbox = subscribe_drasi_inbox(
                 config=config,
                 admission=admission,
-                dapr_client=context.dapr_client,
-                workflow_client=context.wf_client,
+                dapr_client=self._inbox_client,
+                workflow_client=self._runner.workflow_client(),
             )
-            prepared_resources = resources.pop_all()
+            self._inbox_client = None
+            return self._runner
+        except BaseException as primary:
+            _add_cleanup_notes(primary, self._cleanup())
+            raise
 
-            def close() -> None:
-                # Keep the consumer's dependencies and ownership until it stops.
-                # A failed inbox close can be retried by the owning runner.
-                close_inbox()
-                prepared_resources.close()
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        del exc_type, traceback
+        errors = self._cleanup()
+        if exc is not None:
+            _add_cleanup_notes(exc, errors)
+            return False
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Drasi lifecycle cleanup failed.", errors)
+        return False
 
-            return close
+    async def aclose(self) -> None:
+        """Retry unresolved resource cleanup without rehosting the lifecycle."""
+        errors = self._cleanup()
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Drasi lifecycle cleanup failed.", errors)
 
-    register_activation(agent, mode="dynamic", callback=prepare, before_start=True)
+    def _cleanup(self) -> list[Exception]:
+        if self._cleanup_complete:
+            return []
+        errors: list[Exception] = []
+
+        if self._inbox is not None:
+            try:
+                self._inbox.close()
+            except Exception as error:
+                errors.append(error)
+            if self._inbox.is_closed:
+                self._inbox = None
+            elif not self._inbox.is_stopped:
+                return errors
+        elif self._inbox_client is not None:
+            try:
+                self._inbox_client.close()
+            except Exception as error:
+                errors.append(error)
+            else:
+                self._inbox_client = None
+
+        unresolved_runner_clients: list[DaprClient] = []
+        for client in self._runner_dapr_clients:
+            try:
+                client.close()
+            except Exception as error:
+                errors.append(error)
+                unresolved_runner_clients.append(client)
+        self._runner_dapr_clients = unresolved_runner_clients
+
+        if self._runner is not None and not self._runner_unwired:
+            try:
+                self._runner.unwire_pubsub()
+            except Exception as error:
+                errors.append(error)
+                return errors
+            else:
+                self._runner_unwired = True
+        if self._runner_dapr_clients:
+            return errors
+
+        if not self._hosting_attempted:
+            self._runtime_drained = True
+        elif not self._runtime_drained:
+            try:
+                self._agent.runtime.shutdown()
+            except Exception as error:
+                errors.append(error)
+                return errors
+            else:
+                self._runtime_drained = True
+
+        if self._runner is not None:
+            try:
+                self._runner.shutdown(self._agent if self._hosting_attempted else None)
+            except Exception as error:
+                errors.append(error)
+                return errors
+            else:
+                self._runner = None
+
+        if self._router is not None:
+            try:
+                self._router.close()
+            except Exception as error:
+                errors.append(error)
+                return errors
+            else:
+                self._router = None
+
+        if (
+            self._inbox is not None
+            or self._inbox_client is not None
+            or self._runner_dapr_clients
+            or self._runner is not None
+            or self._router is not None
+        ):
+            return errors
+
+        if self._release_application is not None:
+            try:
+                self._release_application()
+            except Exception as error:
+                errors.append(error)
+                return errors
+            else:
+                self._release_application = None
+
+        self._cleanup_complete = self._release_application is None
+        return errors
+
+
+def drasi_subscription_lifecycle(
+    agent: DurableAgent,
+    *,
+    router_id: str,
+    namespace: str,
+    app: FastAPI | None = None,
+    workflow_client: DaprWorkflowClient | None = None,
+    pubsub: str | None = None,
+    dapr_http_port: int | None = None,
+    router_timeout_seconds: float = 30.0,
+    startup_timeout_seconds: float = 30.0,
+) -> DrasiSubscriptionLifecycle:
+    """Create a one-shot context for agent-managed Drasi subscriptions."""
+    return DrasiSubscriptionLifecycle(
+        agent,
+        router_id=router_id,
+        namespace=namespace,
+        app=app,
+        workflow_client=workflow_client,
+        pubsub=pubsub,
+        dapr_http_port=dapr_http_port,
+        router_timeout_seconds=router_timeout_seconds,
+        startup_timeout_seconds=startup_timeout_seconds,
+    )
+
+
+__all__ = [
+    "DrasiLifecycleError",
+    "DrasiSubscriptionLifecycle",
+    "drasi_subscription_lifecycle",
+]

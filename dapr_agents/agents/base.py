@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from importlib.metadata import version
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Type, Union, Coroutine
@@ -642,7 +641,6 @@ class AgentBase:
         # Execution config
         # -----------------------------
         self.execution = execution or AgentExecutionConfig()
-        self._initial_tool_choice: Optional[str] = self.execution.tool_choice
         try:
             self.execution.max_iterations = max(1, int(self.execution.max_iterations))
         except Exception:

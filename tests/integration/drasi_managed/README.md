@@ -13,7 +13,7 @@ limitations under the License.
 
 # Managed Drasi integration
 
-Credential-free integration coverage for [amansinghoriginal/dapr-agents#15](https://github.com/amansinghoriginal/dapr-agents/issues/15). This suite exercises `enable_drasi_subscriptions()` with the actual built-in DaprAgentRouter, shared protocol package, Dapr service invocation, streaming Pub/Sub, persistent state, and workflow execution.
+Credential-free integration coverage for [amansinghoriginal/dapr-agents#15](https://github.com/amansinghoriginal/dapr-agents/issues/15). This suite exercises `drasi_subscription_lifecycle()` with the actual built-in DaprAgentRouter, shared protocol package, Dapr service invocation, streaming Pub/Sub, persistent state, and workflow execution.
 
 The model is a local scripted HTTP fixture, not an external LLM. It deterministically invokes the generated subscription-list tool and the agent's ordinary `record_event` tool through the normal durable chat/tool loop. The temporary receiver records actions for inspection; it is not the autonomous demonstration or a production idempotency service.
 
@@ -48,7 +48,7 @@ uv run --frozen --no-sync pytest \
 
 Images build once per pytest session. Each case then creates a fresh, randomly named Compose project, a private bridge network, temporary query files, and project-owned state volumes. Every published port binds to an ephemeral loopback port. The agent, router, and broker never adopt an existing container or application state.
 
-The pinned Dapr SDK waits for `/v1.0/healthz/outbound` during `DaprClient` construction, before the agent's metadata RPC. The host uses this existing readiness gate rather than adding a second startup retry loop.
+The pinned Dapr SDK waits for `/v1.0/healthz/outbound` during `DaprClient` construction, before the agent's metadata RPC. The lifecycle also checks `WorkflowRuntime.wait_for_worker_ready()` before opening the dynamic inbox or exposing application readiness.
 
 Compose is invoked with an empty environment file, and the agent build has an explicit file allowlist that excludes `.env`, `.env.*`, virtual environments, and Git metadata. The repository's Azure/model configuration is not loaded or copied into either application.
 
@@ -94,6 +94,8 @@ Logs are also captured when startup fails; full artifacts are collected only aft
 | Poison input and retry exhaustion | Original data reaches the configured DLT; poison never invokes the model |
 | Active/terminal duplicates | Replay reaches the native scheduler and gets `ALREADY_EXISTS` while active; terminal ID reuse starts a new execution and repeats the ordinary action |
 | Mode exclusion and tools | Both static/dynamic registration orders reject mixing; ordinary tools and all generated tools remain available in event workflows |
+| Lifecycle ownership | A dedicated inbox Dapr client unblocks and joins streaming intake before workflow and router cleanup |
+| In-flight shutdown | A real generated subscription tool drains before router close while inbox shutdown remains clean |
 
 The only scheduling instrumentation is a `DaprWorkflowClient` subclass that records calls, optionally holds a call before acceptance, or selects the deliberately unreachable real client. Successful calls always delegate to the native scheduler. There are no fabricated workflow IDs, fake state clients, mocked router responses, or synthetic broker acknowledgements.
 

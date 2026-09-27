@@ -18,7 +18,7 @@ import concurrent.futures
 import logging
 import os
 import uuid
-from threading import Lock, RLock, Thread
+from threading import Lock, Thread
 from typing import (
     Any,
     AsyncIterator,
@@ -53,7 +53,7 @@ from dapr_agents.streaming.listeners import (
 )
 from dapr_agents.tool.workflow.agent_tool import AgentWorkflowTool
 from dapr_agents.types.streaming import AgentStreamChunk, StreamChunkType
-from dapr_agents.types.activation import ActivationCallback, ActivationContext
+from dapr_agents.types.activation import ActivationContext
 from dapr_agents.types.workflow import PubSubRouteSpec
 from dapr_agents.utils import DaprClientFactory
 from dapr_agents.workflow.runners.base import WorkflowRunner
@@ -174,13 +174,10 @@ class AgentRunner(WorkflowRunner):
         # In-memory store of managed agents - used for handling shutdown
         self._managed_agents: List[DurableAgent] = []
         self._lock: Lock = Lock()
-        self._attach_lock = RLock()
         # Activation-hook state (see _attach_agent / DurableAgent.add_activation):
         #   _activated_agent_ids — fire-once guard keyed by id(agent)
         #   _activation_closers  — teardown closers per agent, drained on shutdown
         self._activated_agent_ids: set[int] = set()
-        self._preparing_agent_ids: set[int] = set()
-        self._activation_close_failures: set[int] = set()
         self._activation_closers: Dict[int, List[Callable[[], None]]] = {}
 
     @staticmethod
@@ -246,7 +243,7 @@ class AgentRunner(WorkflowRunner):
             timeout_in_seconds,
         )
         await self._ensure_mcp_connected(agent)
-        await self._attach_agent_async(agent)
+        self._attach_agent(agent)
 
         entry = self.discover_entry(agent)
         logger.debug("[%s] Discovered workflow entry: %s", self._name, entry.__name__)
@@ -299,7 +296,7 @@ class AgentRunner(WorkflowRunner):
         """
 
         await self._ensure_mcp_connected(agent)
-        await self._attach_agent_async(agent)
+        self._attach_agent(agent)
 
         chosen_instance_id = instance_id or uuid.uuid4().hex
         listener_config = self._resolve_default_listener(
@@ -1479,85 +1476,45 @@ class AgentRunner(WorkflowRunner):
     # ------------------------------------------------------------------
     # Activation hooks (extension seam)
     # ------------------------------------------------------------------
-    async def _attach_agent_async(self, agent: DurableAgent) -> None:
-        if not agent.pre_start_activations:
-            self._attach_agent(agent)
-            return
-        preparation = asyncio.create_task(asyncio.to_thread(self._attach_agent, agent))
-        try:
-            await asyncio.shield(preparation)
-        except asyncio.CancelledError:
-            # A cancelled await cannot stop blocking preparation. Join it so its
-            # resources remain managed or rolled back before cancellation returns.
-            try:
-                await preparation
-            except Exception:
-                logger.exception("Agent preparation failed during cancellation")
-            raise
-
     def _attach_agent(self, agent: DurableAgent, app: Optional[FastAPI] = None) -> None:
-        """Prepare, start, and activate an agent once per hosting lifecycle.
-
-        Concurrent hosts wait for preparation rather than observing a partial
-        attachment. Existing post-start callbacks may re-enter the runner;
-        preparation callbacks cannot start ordinary agent work.
-        """
-        with self._attach_lock:
-            self._attach_agent_locked(agent, app)
-
-    def _attach_agent_locked(self, agent: DurableAgent, app: Optional[FastAPI]) -> None:
-        if id(agent) in self._activation_close_failures:
-            raise RuntimeError(
-                f"Agent {agent.name!r} has unfinished activation cleanup; "
-                "retry shutdown before hosting it again."
-            )
-        if id(agent) in self._preparing_agent_ids:
-            raise RuntimeError(
-                f"Agent {agent.name!r} cannot be hosted while its preparation is running."
-            )
-        if id(agent) in self._activated_agent_ids:
-            try:
-                agent.start()
-            except RuntimeError:
-                pass
-            return
-
-        preparations = list(agent.pre_start_activations)
-        if preparations and agent.is_started:
-            raise RuntimeError(
-                f"Agent {agent.name!r} requires preparation before its workflow "
-                "runtime starts; host it through AgentRunner first."
-            )
+        """Start, register, and activate an agent for hosting once per agent."""
 
         started_here = False
+        try:
+            agent.start()
+            started_here = True
+        except RuntimeError:
+            # Already started; not ours to stop on rollback.
+            pass
+
         with self._lock:
+            if id(agent) in self._activated_agent_ids:
+                return
             added_here = agent not in self._managed_agents
             if added_here:
                 self._managed_agents.append(agent)
             callbacks = list(agent.activations)
+            self._activated_agent_ids.add(id(agent))
             agent._activation_window_open = False
 
-        collected: List[Callable[[], None]] = []
-        context: Optional[ActivationContext] = None
+        if not callbacks:
+            return
 
-        def activate(phase: List[ActivationCallback]) -> None:
-            nonlocal context
-            if not phase:
-                return
-            if context is None:
-                self._ensure_dapr_client()
-                if self._dapr_client is None:
-                    raise RuntimeError(
-                        "Dapr client unavailable during agent attachment."
-                    )
-                context = ActivationContext(
-                    agent=agent,
-                    runner=self,
-                    dapr_client=self._dapr_client,
-                    wf_client=self._wf_client,
-                    app=app,
+        collected: List[Callable[[], None]] = []
+        try:
+            self._ensure_dapr_client()
+            if self._dapr_client is None:
+                raise RuntimeError(
+                    "Dapr client unavailable after _ensure_dapr_client()."
                 )
-            for callback in phase:
+            context = ActivationContext(
+                agent=agent,
+                runner=self,
+                dapr_client=self._dapr_client,
+                wf_client=self._wf_client,
+                app=app,
+            )
+            for callback in callbacks:
                 label = getattr(callback, "__qualname__", repr(callback))
                 try:
                     closer = callback(context)
@@ -1574,33 +1531,14 @@ class AgentRunner(WorkflowRunner):
                         f"closer or None, got {type(closer).__name__!r}"
                     )
                 collected.append(closer)
-
-        self._preparing_agent_ids.add(id(agent))
-        try:
-            try:
-                if preparations:
-                    agent.start(prepare=lambda: activate(preparations))
-                else:
-                    agent.start()
-                started_here = True
-            except RuntimeError:
-                if preparations:
-                    raise
-                # Preserve attachment to an already-started legacy agent.
-            self._preparing_agent_ids.discard(id(agent))
-            self._activated_agent_ids.add(id(agent))
-            activate(callbacks)
         except Exception:
             self._abort_attach(
                 agent, collected, started_here=started_here, added_here=added_here
             )
             raise
-        finally:
-            self._preparing_agent_ids.discard(id(agent))
 
-        if collected:
-            with self._lock:
-                self._activation_closers[id(agent)] = collected
+        with self._lock:
+            self._activation_closers[id(agent)] = collected
 
     def _abort_attach(
         self,
@@ -1613,28 +1551,9 @@ class AgentRunner(WorkflowRunner):
         """Roll back a failed attach: close collected closers, release the
         activation guard, and undo the managed/started state only if THIS call
         created it — so a pre-existing host or shared runtime is left intact."""
-        if started_here and agent.pre_start_activations:
-            try:
-                agent.stop()
-            except Exception:
-                logger.exception("Error stopping prepared agent during attach rollback")
-            started_here = False
-        if agent.pre_start_activations and agent.is_started:
-            # Startup/rollback could not confirm that the worker stopped.
-            # Keep its tools, clients and ownership until shutdown succeeds.
-            with self._lock:
-                self._activation_closers[id(agent)] = collected
-                self._activation_close_failures.add(id(agent))
-            return
-        failed_closers = self._rollback_activation_closers(collected)
+        self._rollback_activation_closers(collected)
         with self._lock:
-            if failed_closers:
-                self._activation_closers[id(agent)] = failed_closers
-                self._activated_agent_ids.add(id(agent))
-                self._activation_close_failures.add(id(agent))
-            else:
-                self._activated_agent_ids.discard(id(agent))
-                self._activation_close_failures.discard(id(agent))
+            self._activated_agent_ids.discard(id(agent))
             if added_here and agent in self._managed_agents:
                 self._managed_agents.remove(agent)
         if started_here:
@@ -1643,11 +1562,8 @@ class AgentRunner(WorkflowRunner):
             except Exception:
                 logger.exception("Error stopping agent during attach rollback")
 
-    def _rollback_activation_closers(
-        self, closers: List[Callable[[], None]]
-    ) -> List[Callable[[], None]]:
+    def _rollback_activation_closers(self, closers: List[Callable[[], None]]) -> None:
         """Best-effort close (reverse order) of closers from a failed attach."""
-        failed = []
         for close in reversed(closers):
             try:
                 close()
@@ -1655,11 +1571,9 @@ class AgentRunner(WorkflowRunner):
                 logger.exception(
                     "Error while rolling back activation closer after failure"
                 )
-                failed.append(close)
-        return list(reversed(failed))
 
     def _close_activations(self, agent: Optional[DurableAgent] = None) -> None:
-        """Close activations, retaining failed closers for a shutdown retry.
+        """Invoke and clear activation teardown closers, resetting the guard.
 
         With no ``agent`` every tracked closer runs and the guard is cleared (full
         shutdown). With an ``agent`` only that agent's closers run and its guard
@@ -1667,33 +1581,18 @@ class AgentRunner(WorkflowRunner):
         """
         with self._lock:
             if agent is None:
-                groups = list(self._activation_closers.items())
+                groups = list(self._activation_closers.values())
                 self._activation_closers.clear()
                 self._activated_agent_ids.clear()
-                self._activation_close_failures.clear()
             else:
-                groups = [(id(agent), self._activation_closers.pop(id(agent), []))]
+                groups = [self._activation_closers.pop(id(agent), [])]
                 self._activated_agent_ids.discard(id(agent))
-                self._activation_close_failures.discard(id(agent))
-        errors = []
-        for agent_id, closers in groups:
-            failed = []
+        for closers in groups:
             for close in reversed(closers):
                 try:
                     close()
-                except Exception as error:
+                except Exception:
                     logger.exception("Error while closing activation")
-                    failed.append(close)
-                    errors.append(error)
-            if failed:
-                with self._lock:
-                    self._activation_closers[agent_id] = list(reversed(failed))
-                    self._activated_agent_ids.add(agent_id)
-                    self._activation_close_failures.add(agent_id)
-        if errors:
-            raise ExceptionGroup(
-                "Could not close agent activations; retry shutdown.", errors
-            )
 
     def shutdown(self, agent: Optional[DurableAgent] = None) -> None:
         """
@@ -1706,57 +1605,38 @@ class AgentRunner(WorkflowRunner):
             None
         """
 
-        with self._attach_lock:
-            self._shutdown_agent(agent)
-
-    def _shutdown_agent(self, agent: Optional[DurableAgent]) -> None:
         if agent:
             # Shut down a single managed agent. Mutate shared state under the
             # lock, then run teardown (instrument/stop/closers) unlocked so a
             # self-locking _close_activations cannot deadlock.
             with self._lock:
                 managed = agent in self._managed_agents
+                if managed:
+                    self._managed_agents.remove(agent)
+                last = len(self._managed_agents) == 0
             if managed:
-                try:
-                    agent.stop()
-                except Exception:
-                    with self._lock:
-                        self._activation_close_failures.add(id(agent))
-                    raise
                 try:
                     if agent.instrumentor is not None:
                         agent.instrumentor.uninstrument()
                 except AttributeError:
                     # this happens if the agent has no instrumentor
                     pass
-                with self._lock:
-                    self._managed_agents.remove(agent)
-            with self._lock:
-                last = len(self._managed_agents) == 0
-            self._close_activations(agent)
+                agent.stop()
+                self._close_activations(agent)
             if last:
                 try:
                     self.unwire_pubsub()
                     self._close_activations()
                 finally:
-                    if not self._activation_closers:
-                        self._close_wf_client()
-                        self._close_dapr_client()
+                    self._close_wf_client()
+                    self._close_dapr_client()
             return
-        with self._lock:
-            agents = list(self._managed_agents)
-        for managed in agents:
-            if managed.pre_start_activations:
-                try:
-                    managed.stop()
-                except Exception:
-                    with self._lock:
-                        self._activation_close_failures.add(id(managed))
-                    raise
         try:
             self.unwire_pubsub()
             self._close_activations()
         finally:
+            with self._lock:
+                agents = list(self._managed_agents)
             for ag in agents:
                 try:
                     if ag.instrumentor is not None:
@@ -1764,8 +1644,6 @@ class AgentRunner(WorkflowRunner):
                 except AttributeError:
                     # this happens if the agent has no instrumentor
                     pass
-                if not ag.pre_start_activations:
-                    ag.stop()
-            if not self._activation_closers:
-                self._close_wf_client()
-                self._close_dapr_client()
+                ag.stop()
+            self._close_wf_client()
+            self._close_dapr_client()

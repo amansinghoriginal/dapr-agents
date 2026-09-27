@@ -18,7 +18,7 @@ from threading import Lock
 from typing import Callable, Literal, TypeAlias
 
 from dapr_agents.agents.durable import DurableAgent
-from dapr_agents.types.activation import ActivationCallback, ActivationContext
+from dapr_agents.types.activation import ActivationCallback
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ _MODE_ATTRIBUTE = "_dapr_agents_ext_drasi_mode"
 _MODE_LOCK = Lock()
 
 
-_APPLICATION_OWNERS: dict[str, DurableAgent] = {}
+_DYNAMIC_APPLICATION_OWNERS: dict[str, object] = {}
 
 
 class DrasiModeConflictError(ValueError):
@@ -36,47 +36,65 @@ class DrasiModeConflictError(ValueError):
 
 
 class DrasiApplicationConflictError(ValueError):
-    """Another local Drasi agent is already hosted for this Dapr application."""
+    """Another dynamic lifecycle is active for this Dapr application."""
 
 
-def _claim_application(agent: DurableAgent) -> None:
+def _check_mode_locked(agent: DurableAgent, mode: DrasiMode) -> None:
+    previous_mode = getattr(agent, _MODE_ATTRIBUTE, None)
+    if previous_mode is not None and (previous_mode != mode or mode == "dynamic"):
+        message = (
+            f"Cannot register Drasi {mode} mode for agent {agent.name!r}: "
+            f"{previous_mode} mode is already registered."
+        )
+        logger.error("%s", message)
+        raise DrasiModeConflictError(message)
+
+
+def claim_dynamic_mode(agent: DurableAgent) -> None:
+    """Reserve dynamic mode on a fresh agent without registering an activation."""
+    with _MODE_LOCK:
+        _check_mode_locked(agent, "dynamic")
+        setattr(agent, _MODE_ATTRIBUTE, "dynamic")
+
+
+def validate_dynamic_mode(agent: DurableAgent) -> None:
+    """Check dynamic mode availability without mutating the agent."""
+    with _MODE_LOCK:
+        _check_mode_locked(agent, "dynamic")
+
+
+def validate_claimed_dynamic_mode(agent: DurableAgent) -> None:
+    """Confirm this agent still holds the dynamic-mode registration."""
+    with _MODE_LOCK:
+        if getattr(agent, _MODE_ATTRIBUTE, None) != "dynamic":
+            raise DrasiModeConflictError(
+                f"Agent {agent.name!r} no longer owns Drasi dynamic mode."
+            )
+
+
+def claim_dynamic_application(agent: DurableAgent) -> Callable[[], None]:
+    """Claim one active dynamic lifecycle for an application in this process."""
     app_id = agent.appid
     if not isinstance(app_id, str) or not app_id:
-        # Static registrations predate an application-identity requirement.
-        return
-
+        raise ValueError("Dynamic Drasi subscriptions require a Dapr application ID.")
+    token = object()
     with _MODE_LOCK:
-        owner = _APPLICATION_OWNERS.get(app_id)
-        if owner is not None and owner is not agent:
+        owner = _DYNAMIC_APPLICATION_OWNERS.get(app_id)
+        if owner is not None:
             message = (
-                f"Dapr application {app_id!r} already hosts another Drasi agent. "
-                "Use one Drasi-enabled logical agent per Dapr application."
+                f"Dapr application {app_id!r} already has an active dynamic Drasi "
+                "lifecycle. Use one logical agent per application."
             )
             logger.error("%s", message)
             raise DrasiApplicationConflictError(message)
-        # One owner for this process lifetime; shutdown is not an agent handoff.
-        _APPLICATION_OWNERS[app_id] = agent
+        _DYNAMIC_APPLICATION_OWNERS[app_id] = token
 
+    def release() -> None:
+        with _MODE_LOCK:
+            if _DYNAMIC_APPLICATION_OWNERS.get(app_id) is token:
+                del _DYNAMIC_APPLICATION_OWNERS[app_id]
 
-def _guard_application(callback: ActivationCallback) -> ActivationCallback:
-    lock = Lock()
-    attempted = False
-
-    def activate(context: ActivationContext) -> Callable[[], None] | None:
-        nonlocal attempted
-        with lock:
-            if attempted:
-                message = (
-                    "This Drasi hosting lifecycle has ended or failed. "
-                    "Restart the application; do not reuse its agent or runner."
-                )
-                logger.error("%s", message)
-                raise DrasiApplicationConflictError(message)
-            _claim_application(context.agent)
-            attempted = True
-            return callback(context)
-
-    return activate
+    return release
 
 
 def register_activation(
@@ -84,7 +102,6 @@ def register_activation(
     *,
     mode: DrasiMode,
     callback: ActivationCallback,
-    before_start: bool = False,
 ) -> None:
     """Register an activation without mixing Drasi modes on an agent.
 
@@ -92,18 +109,6 @@ def register_activation(
     failed hosting attempts and subscription shutdown.
     """
     with _MODE_LOCK:
-        previous_mode = getattr(agent, _MODE_ATTRIBUTE, None)
-        if previous_mode is not None and (previous_mode != mode or mode == "dynamic"):
-            message = (
-                f"Cannot register Drasi {mode} mode for agent {agent.name!r}: "
-                f"{previous_mode} mode is already registered."
-            )
-            logger.error("%s", message)
-            raise DrasiModeConflictError(message)
-
-        guarded = _guard_application(callback)
-        if before_start:
-            agent.add_activation(guarded, before_start=True)
-        else:
-            agent.add_activation(guarded)
+        _check_mode_locked(agent, mode)
+        agent.add_activation(callback)
         setattr(agent, _MODE_ATTRIBUTE, mode)

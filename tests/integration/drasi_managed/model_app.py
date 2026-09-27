@@ -95,7 +95,32 @@ def completion(request: ChatRequest) -> dict[str, Any]:
     }
     message: dict[str, Any] = {"role": "assistant", "content": "Recorded."}
     finish_reason = "stop"
-    if not required.issubset(called):
+    if task == "LIFECYCLE_SUBSCRIBE":
+        name = next(
+            item for item in names if item.startswith("subscribe_service-errors")
+        )
+        if name not in called:
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"call_{uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(
+                                {
+                                    "operations": ["i"],
+                                    "instructions": "Lifecycle drainage verification.",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+            finish_reason = "tool_calls"
+    elif not required.issubset(called):
         name = (
             "list_drasi_subscriptions"
             if "list_drasi_subscriptions" not in called

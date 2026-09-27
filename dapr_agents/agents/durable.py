@@ -405,14 +405,12 @@ class DurableAgent(AgentBase):
         self._runtime_owned = runtime is None
         self._registered = False
         self._started = False
-        self._prepared_runtime = False
         self._hooks: Optional[Hooks] = hooks
         # Activation callbacks registered by extensions via add_activation().
         # The AgentRunner fires each one exactly once when this agent is first
         # hosted (serve/subscribe/register_routes/workflow/run). The window is
         # closed by the runner on first attach so late registrations fail loudly.
         self._activations: List[ActivationCallback] = []
-        self._pre_start_activations: List[ActivationCallback] = []
         self._activation_window_open: bool = True
         # Tracks active approval requests in memory, keyed by approval_request_id.
         # Persisted to Dapr State Store so requests survive pod restarts.
@@ -519,17 +517,10 @@ class DurableAgent(AgentBase):
     # ------------------------------------------------------------------
     @property
     def activations(self) -> List[ActivationCallback]:
-        """Post-start activation callbacks registered on this agent."""
+        """Activation callbacks registered on this agent (read-only copy)."""
         return list(self._activations)
 
-    @property
-    def pre_start_activations(self) -> List[ActivationCallback]:
-        """Preparation callbacks that must complete before the worker starts."""
-        return list(self._pre_start_activations)
-
-    def add_activation(
-        self, callback: ActivationCallback, *, before_start: bool = False
-    ) -> None:
+    def add_activation(self, callback: ActivationCallback) -> None:
         """Register a callback fired once when this agent is first hosted.
 
         The callback runs exactly once the first time the agent is attached to
@@ -543,11 +534,6 @@ class DurableAgent(AgentBase):
         Args:
             callback: Callable taking an ``ActivationContext`` and returning an
                 optional teardown closer.
-            before_start: Run blocking preparation before the workflow worker
-                starts, rather than after it. Preparation must not wait for
-                workflow completion. Async runner entry points offload and await
-                this phase. Returned closers participate in ordinary rollback
-                and shutdown.
 
         Raises:
             TypeError: If ``callback`` is not callable.
@@ -564,13 +550,7 @@ class DurableAgent(AgentBase):
                 "hosted; register activations before "
                 "serve()/subscribe()/register_routes()/workflow()/run()/run_stream()."
             )
-        if before_start and self.is_started:
-            raise RuntimeError(
-                f"Cannot register preparation for agent {self.name!r} after its "
-                "workflow runtime has started."
-            )
-        callbacks = self._pre_start_activations if before_start else self._activations
-        callbacks.append(callback)
+        self._activations.append(callback)
 
     # ------------------------------------------------------------------
     # Workflows / Activities
@@ -4086,7 +4066,6 @@ class DurableAgent(AgentBase):
         runtime: Optional[wf.WorkflowRuntime] = None,
         *,
         auto_register: bool = True,
-        prepare: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         Start the workflow runtime and register this agent's components.
@@ -4097,25 +4076,9 @@ class DurableAgent(AgentBase):
         • Always attempt to start the runtime; treat start() as idempotent:
             - If it's already running, swallow/log the exception and continue.
         • We only call shutdown() later if we own the runtime.
-
-        ``prepare`` is the runner's synchronous preparation boundary, after
-        configuration and workflow registration but before worker execution.
         """
         if self._started:
             raise RuntimeError("Agent has already been started.")
-        if self._pre_start_activations and prepare is None:
-            raise RuntimeError(
-                "This agent requires preparation; host it through AgentRunner."
-            )
-        if prepare is not None and (runtime is not None or not self._runtime_owned):
-            message = (
-                "Pre-start preparation requires an agent-owned workflow runtime. "
-                "Omit runtime= and let AgentRunner manage its lifetime."
-            )
-            logger.error("%s", message)
-            raise RuntimeError(message)
-        if prepare is not None:
-            self._prepared_runtime = True
 
         # Set up lifecycle-managed resources (e.g., configuration subscription)
         super().start()
@@ -4139,17 +4102,7 @@ class DurableAgent(AgentBase):
                 self.name,
             )
 
-        if prepare is not None:
-            try:
-                prepare()
-            except BaseException:
-                super().stop()
-                raise
-
         # Always try to start; treat as idempotent.
-        if prepare is not None:
-            # Startup may begin serving work before reporting an error.
-            self._started = True
         try:
             self._runtime.start()
             logger.info(
@@ -4158,20 +4111,6 @@ class DurableAgent(AgentBase):
                 self._runtime_owned,
             )
         except Exception as exc:  # noqa: BLE001
-            if prepare is not None:
-                logger.error(
-                    "WorkflowRuntime failed to start prepared agent '%s' (%s).",
-                    self.name,
-                    type(exc).__name__,
-                )
-                try:
-                    self.stop()
-                except Exception as cleanup_error:
-                    raise ExceptionGroup(
-                        "Prepared workflow startup and shutdown both failed.",
-                        [exc, cleanup_error],
-                    ) from None
-                raise
             # Most common benign case: runtime already running
             logger.warning(
                 "WorkflowRuntime.start() raised for agent '%s' (likely already running): %s",
@@ -4192,13 +4131,7 @@ class DurableAgent(AgentBase):
         if self._runtime_owned:
             try:
                 self._runtime.shutdown()
-            except Exception as error:  # noqa: BLE001
-                if self._prepared_runtime:
-                    logger.error(
-                        "Prepared workflow runtime did not stop (%s).",
-                        type(error).__name__,
-                    )
-                    raise
+            except Exception:  # noqa: BLE001
                 logger.debug(
                     "Error while shutting down workflow runtime", exc_info=True
                 )

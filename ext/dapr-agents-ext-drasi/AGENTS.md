@@ -34,6 +34,8 @@ ext/dapr-agents-ext-drasi/
 │           ├── __init__.py                 # Public package exports
 │           ├── activations.py              # register_drasi_trigger activation wiring
 │           ├── _registration.py            # Private per-agent Drasi mode registration
+│           ├── subscriptions.py            # Dynamic one-shot lifecycle context
+│           ├── delivery.py                 # Dynamic inbox admission and scheduling
 │           ├── types.py                    # Re-exported Drasi event models and public names
 │           ├── schemas/                    # Generated Drasi schema models
 │           │   └── unpacked/               # Generated model files (do not edit by hand)
@@ -41,6 +43,7 @@ ext/dapr-agents-ext-drasi/
 │               └── validation.py           # Event/model validation helpers
 └── tests/
     ├── test_register_drasi_trigger.py      # Activation wiring and trigger behavior tests
+    ├── test_enable_drasi_subscriptions.py  # Dynamic lifecycle composition tests
     ├── schemas/
     │   └── test_unpacked_event_models.py   # Generated event model smoke tests
     └── utils/
@@ -71,8 +74,9 @@ All public symbols are exported from `dapr_agents.ext.drasi`:
 ```python
 from dapr_agents.ext.drasi import (
     register_drasi_trigger,  # Register author-configured Drasi query triggers
-    DrasiChangeEvent,   # Drasi change event model emitted by a query
-    DrasiOperation,     # Drasi operation enum: i, u, or d
+    drasi_subscription_lifecycle,  # Host agent-managed subscriptions
+    DrasiChangeEvent,              # Drasi change event model emitted by a query
+    DrasiOperation,                # Drasi operation enum: i, u, or d
 )
 ```
 
@@ -90,9 +94,12 @@ Notes:
 - `dapr_agents.ext` is a PEP 420 namespace package. Do not add an
     `__init__.py` to `dapr_agents/ext/`; that would change import behavior.
 - `register_drasi_trigger` is activation-time wiring only. It does not start the agent runtime by itself; it registers pub/sub routes on the target `DurableAgent`.
-- Multiple static query registrations on the same agent are supported. Static and future dynamic entry points must both use `_registration.register_activation` to prevent mixing modes in either registration order. Mode ownership remains attached to the agent across shutdown or failed hosting attempts.
+- Multiple static query registrations on the same agent are supported. Static registration and the dynamic lifecycle share `_registration` mode checks so they cannot be mixed in either order.
 - The router contract dependency belongs to this extension and is pinned to a public Git revision. Do not copy its generated models or replace the existing unpacked static event models with router delivery models.
-- `enable_drasi_subscriptions()` is reserved for the complete dynamic implementation; do not export a placeholder.
+- `drasi_subscription_lifecycle()` hosts only once. Use fresh agent and runner objects after failure or shutdown; `aclose()` may retry unresolved cleanup but never rehosts.
+- Dynamic mode requires a fresh agent constructed without `runtime=` and currently rejects `RuntimeSubscriptionConfig` and pre-existing activation callbacks.
+- The dynamic inbox owns a dedicated Dapr client created from `agent.client_factory`; it borrows the runner's workflow client.
+- The lifecycle creates the runner. Tests or applications may inject only the workflow client through `workflow_client=`; ownership remains with the injector.
 - The default topic is derived from the query ID as
     `drasi-events-<query_id>`.
 - If `pubsub` is omitted, the extension falls back to the agent's configured
@@ -138,6 +145,8 @@ Notes:
 
     - `tests/test_register_drasi_trigger.py` — activation wiring and end-to-end trigger
         behavior at the extension boundary
+    - `tests/test_enable_drasi_subscriptions.py` — dynamic lifecycle preparation,
+        readiness, ownership, cleanup, and exception behavior
     - `tests/utils/test_validation.py` — validation helpers and schema
         coercion behavior
     - `tests/schemas/test_unpacked_event_models.py` — smoke tests for generated

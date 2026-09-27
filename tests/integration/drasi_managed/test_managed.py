@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from typing import Any
@@ -484,6 +485,49 @@ def test_duplicate_active_workflow_is_acknowledged(runtime: Runtime) -> None:
     assert runtime.evidence()["records"] == []
     runtime.request("POST", f"{runtime.model_url}/gate", json={"blocked": False})
     runtime.completed()
+
+
+def test_shutdown_drains_generated_tool_and_unblocks_inbox(runtime: Runtime) -> None:
+    runtime.request(
+        "POST",
+        f"{runtime.agent_url}/spike/router-delay",
+        json={"seconds": 4.0},
+    )
+    started_workflow = runtime.request(
+        "POST",
+        f"{runtime.agent_url}/agent/run",
+        json={"task": "LIFECYCLE_SUBSCRIBE"},
+    )
+    assert started_workflow["instance_id"]
+
+    def tool_entered() -> bool:
+        logs = runtime.compose("logs", "--no-color", "agent", timeout=30)
+        return "LIFECYCLE_ROUTER_SUBSCRIBE_ENTER thread=DurableTask" in logs
+
+    wait_for(tool_entered, "generated subscription tool to enter router call")
+    started = time.monotonic()
+    runtime.compose("stop", "--timeout", "20", "agent", timeout=45)
+    elapsed = time.monotonic() - started
+    logs = runtime.compose("logs", "--no-color", "agent", timeout=30)
+
+    assert elapsed >= 3.0
+    assert elapsed < 20.0
+    assert "LIFECYCLE_ROUTER_SUBSCRIBE_RELEASE" in logs
+    assert "LIFECYCLE_ROUTER_CLOSE" in logs
+    assert logs.index("LIFECYCLE_ROUTER_SUBSCRIBE_RELEASE") < logs.index(
+        "LIFECYCLE_ROUTER_CLOSE"
+    )
+    assert "Drasi inbox consumer did not stop" not in logs
+    assert "Consumer thread for agent-bus:framework-inbox did not stop" not in logs
+    assert "Application shutdown failed" not in logs
+
+    runtime.compose("start", "agent")
+    runtime.info = wait_for(
+        lambda: runtime.request("GET", f"{runtime.agent_url}/ready"),
+        "agent restart after lifecycle drainage",
+        timeout=90,
+    )
+    assert runtime.intent()["intents"][QUERY]["status"] == "active"
 
 
 @pytest.mark.parametrize("order", ["static-first", "dynamic-first"])

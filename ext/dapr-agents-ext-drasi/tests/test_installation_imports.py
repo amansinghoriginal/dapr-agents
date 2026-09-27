@@ -32,7 +32,8 @@ import dapr_agents.ext.drasi as drasi
 assert dapr_agents.__file__ is not None
 assert callable(DurableAgent)
 assert callable(drasi.register_drasi_trigger)
-assert callable(drasi.enable_drasi_subscriptions)
+assert callable(drasi.drasi_subscription_lifecycle)
+assert callable(drasi.DrasiSubscriptionLifecycle)
 """
 
 _EXTENSION_FIRST = """
@@ -43,7 +44,8 @@ from dapr_agents import DurableAgent
 assert dapr_agents.__file__ is not None
 assert callable(DurableAgent)
 assert callable(drasi.register_drasi_trigger)
-assert callable(drasi.enable_drasi_subscriptions)
+assert callable(drasi.drasi_subscription_lifecycle)
+assert callable(drasi.DrasiSubscriptionLifecycle)
 """
 
 

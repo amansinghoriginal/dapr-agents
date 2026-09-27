@@ -59,7 +59,7 @@ Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Ma
 
 Use the listed CLI versions when reproducing this environment; setup checks tool availability, not exact installed versions. Other images use explicit version tags, which registries can republish. This reference setup does not claim hermetic or bit-for-bit image reproducibility.
 
-This directory has an isolated uv workspace and lockfile so it can run before the later shared workspace/CI/documentation handoff. It installs the core and extension from this repository checkout. Do not replace them with a released package that lacks `enable_drasi_subscriptions()`.
+This directory has an isolated uv workspace and lockfile so it can run before the later shared workspace/CI/documentation handoff. It installs the core and extension from this repository checkout. Do not replace them with a released package that lacks `drasi_subscription_lifecycle()`.
 
 ## Model configuration
 
@@ -97,7 +97,7 @@ Setup builds the pinned Platform components, its CLI, and the actual agent image
 
 The application namespace is `drasi-m2-demo`; Drasi uses `drasi-system`. The script checks the router's one-replica `Recreate` policy and Platform-created state Component before hosting the agent.
 
-**Setup does not submit a model task or create dynamic router rules.** `enable_drasi_subscriptions()` prepares and reconciles the capability before the worker and HTTP readiness are exposed. Query selection happens later, during an ordinary user task.
+**Setup does not submit a model task or create dynamic router rules.** The application's FastAPI lifespan enters `drasi_subscription_lifecycle()`, prepares and reconciles the capability, verifies worker readiness, and opens the inbox before HTTP readiness is exposed. Query selection happens later, during an ordinary user task.
 
 Your default kubeconfig/current context and existing Drasi CLI configuration are not changed. This example stores its kubeconfig, ownership marker, private Drasi configuration, source checkout, and build outputs under ignored `.runtime/`. Setup refuses to reuse or delete an existing cluster with the same name.
 
