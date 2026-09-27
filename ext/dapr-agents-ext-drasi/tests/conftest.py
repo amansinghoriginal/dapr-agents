@@ -35,10 +35,10 @@ _CURRENT_INCARNATION = "incarnation-service-errors"
 
 
 @pytest.fixture(autouse=True)
-def isolated_application_owners(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated_dynamic_application_owners(monkeypatch: pytest.MonkeyPatch) -> None:
     from dapr_agents.ext.drasi import _registration
 
-    monkeypatch.setattr(_registration, "_APPLICATION_OWNERS", {})
+    monkeypatch.setattr(_registration, "_DYNAMIC_APPLICATION_OWNERS", {})
 
 
 def _published_messages() -> dict[str, dict[str, object]]:

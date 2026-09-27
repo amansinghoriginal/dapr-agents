@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
 from threading import Event, Lock, Thread, current_thread
 
 from dapr.clients import DaprClient
@@ -41,6 +40,171 @@ _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 class DrasiDeliveryError(Exception):
     """The inbox consumer could not start, remain active, or close cleanly."""
+
+
+class DrasiInbox:
+    """Owned dynamic-inbox consumer with retryable, resource-specific cleanup."""
+
+    def __init__(
+        self,
+        *,
+        config: ResolvedDrasiConfig,
+        admission: AdmissionHandler,
+        dapr_client: DaprClient,
+        workflow_client: DaprWorkflowClient,
+    ) -> None:
+        self._config = config
+        self._admission = admission
+        self._dapr_client = dapr_client
+        self._workflow_client = workflow_client
+        try:
+            self._subscription: Subscription = dapr_client.subscribe(
+                pubsub_name=config.pubsub_name,
+                topic=config.scope.inbox_topic,
+                dead_letter_topic=config.scope.dead_letter_topic,
+            )
+        except Exception as error:
+            logger.error("Drasi inbox subscription failed (%s).", type(error).__name__)
+            raise DrasiDeliveryError(
+                "Could not subscribe to the Drasi inbox."
+            ) from None
+
+        self._stopped = Event()
+        self._subscription_lock = Lock()
+        self._lifecycle_lock = Lock()
+        self._transport_closed = False
+        self._subscription_closed = False
+        self._closed = False
+        try:
+            self._thread = Thread(
+                target=self._consume,
+                name="drasi-inbox",
+                daemon=True,
+            )
+            self._thread.start()
+        except Exception as error:
+            self._stopped.set()
+            logger.error(
+                "Drasi inbox consumer startup failed (%s).", type(error).__name__
+            )
+            self._close_subscription()
+            raise DrasiDeliveryError(
+                "Could not start the Drasi inbox consumer."
+            ) from None
+
+    @property
+    def is_stopped(self) -> bool:
+        """Return whether the consumer thread can no longer use its dependencies."""
+        return not self._thread.is_alive()
+
+    @property
+    def is_closed(self) -> bool:
+        """Return whether all owned inbox resources are confirmed closed."""
+        return self._closed
+
+    def _close_subscription(self) -> None:
+        with self._subscription_lock:
+            try:
+                self._subscription.close()
+            except Exception as error:
+                logger.error(
+                    "Drasi inbox stream close failed (%s).", type(error).__name__
+                )
+                raise DrasiDeliveryError(
+                    "Could not close the Drasi inbox stream."
+                ) from None
+            self._subscription_closed = True
+
+    def _consume(self) -> None:
+        try:
+            for message in self._subscription:
+                if self._stopped.is_set():
+                    break
+                if message is None:
+                    continue
+                response = _handle_message(
+                    message,
+                    admission=self._admission,
+                    workflow_client=self._workflow_client,
+                    workflow_name=self._config.workflow_name,
+                )
+                if self._stopped.is_set():
+                    break
+                self._subscription.respond(message, response.status)
+            if not self._stopped.is_set():
+                logger.error("Drasi inbox stream ended unexpectedly.")
+        except (StreamCancelledError, StreamInactiveError) as error:
+            if not self._stopped.is_set():
+                logger.error("Drasi inbox stream stopped (%s).", type(error).__name__)
+        except Exception as error:
+            if not self._stopped.is_set():
+                logger.error("Drasi inbox consumer failed (%s).", type(error).__name__)
+        finally:
+            try:
+                self._close_subscription()
+            except DrasiDeliveryError:
+                logger.error("Drasi consumer exited without confirmed stream cleanup.")
+
+    def close(self) -> None:
+        """Stop intake and retry only the inbox resources still unresolved."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+
+            self._stopped.set()
+            errors: list[Exception] = []
+            if not self._transport_closed:
+                try:
+                    self._dapr_client.close()
+                except Exception as error:
+                    logger.error(
+                        "Drasi inbox Dapr client close failed (%s).",
+                        type(error).__name__,
+                    )
+                    errors.append(
+                        DrasiDeliveryError(
+                            "Could not close the Drasi inbox Dapr client."
+                        )
+                    )
+                else:
+                    self._transport_closed = True
+
+            if not self._subscription_closed:
+                try:
+                    self._close_subscription()
+                except DrasiDeliveryError as error:
+                    errors.append(error)
+
+            if current_thread() is self._thread:
+                logger.error("Drasi inbox consumer cannot join its own thread.")
+                errors.append(
+                    DrasiDeliveryError("The Drasi inbox consumer cannot close itself.")
+                )
+            else:
+                self._thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+                if self._thread.is_alive():
+                    logger.error(
+                        "Drasi inbox consumer did not stop before its shutdown deadline."
+                    )
+                    errors.append(
+                        DrasiDeliveryError(
+                            "The Drasi inbox consumer did not stop in time."
+                        )
+                    )
+
+            self._closed = (
+                self._transport_closed
+                and self._subscription_closed
+                and not self._thread.is_alive()
+            )
+            if len(errors) == 1:
+                raise errors[0]
+            if errors:
+                raise ExceptionGroup("Could not close the Drasi inbox.", errors)
+
+    def __call__(self) -> None:
+        """Close the inbox for compatibility with existing private callers."""
+        self.close()
 
 
 def _handle_message(
@@ -124,90 +288,16 @@ def subscribe_drasi_inbox(
     admission: AdmissionHandler,
     dapr_client: DaprClient,
     workflow_client: DaprWorkflowClient,
-) -> Callable[[], None]:
-    """Start a consumer and return its closer; clients and durable rules are borrowed.
+) -> DrasiInbox:
+    """Start an owned dynamic-inbox consumer.
 
     Dapr routes DROP responses to the configured dead-letter topic. RETRY
     exhaustion and dead-letter publication failures remain governed by the
     runtime/broker policies, not by an application-local delivery queue.
     """
-    try:
-        subscription: Subscription = dapr_client.subscribe(
-            pubsub_name=config.pubsub_name,
-            topic=config.scope.inbox_topic,
-            dead_letter_topic=config.scope.dead_letter_topic,
-        )
-    except Exception as error:
-        logger.error("Drasi inbox subscription failed (%s).", type(error).__name__)
-        raise DrasiDeliveryError("Could not subscribe to the Drasi inbox.") from None
-
-    stopped = Event()
-    close_lock = Lock()
-
-    def close_subscription() -> None:
-        # An in-flight SDK reconnect can replace a stream after a close request.
-        # Final consumer cleanup must close the current stream again.
-        with close_lock:
-            try:
-                subscription.close()
-            except Exception as error:
-                logger.error(
-                    "Drasi inbox stream close failed (%s).", type(error).__name__
-                )
-                raise DrasiDeliveryError(
-                    "Could not close the Drasi inbox stream."
-                ) from None
-
-    def consume() -> None:
-        try:
-            for message in subscription:
-                if stopped.is_set():
-                    break
-                if message is None:
-                    continue
-                response = _handle_message(
-                    message,
-                    admission=admission,
-                    workflow_client=workflow_client,
-                    workflow_name=config.workflow_name,
-                )
-                if stopped.is_set():
-                    break
-                # This SDK call queues a response, not a broker receipt confirmation.
-                subscription.respond(message, response.status)
-            if not stopped.is_set():
-                logger.error("Drasi inbox stream ended unexpectedly.")
-        except (StreamCancelledError, StreamInactiveError) as error:
-            if not stopped.is_set():
-                logger.error("Drasi inbox stream stopped (%s).", type(error).__name__)
-        except Exception as error:
-            logger.error("Drasi inbox consumer failed (%s).", type(error).__name__)
-        finally:
-            try:
-                close_subscription()
-            except DrasiDeliveryError:
-                logger.error("Drasi consumer exited without confirmed stream cleanup.")
-
-    try:
-        thread = Thread(target=consume, name="drasi-inbox", daemon=True)
-        thread.start()
-    except Exception as error:
-        stopped.set()
-        logger.error("Drasi inbox consumer startup failed (%s).", type(error).__name__)
-        close_subscription()
-        raise DrasiDeliveryError("Could not start the Drasi inbox consumer.") from None
-
-    def close() -> None:
-        stopped.set()
-        close_subscription()
-        if current_thread() is thread:
-            logger.error("Drasi inbox consumer cannot join its own thread.")
-            raise DrasiDeliveryError("The Drasi inbox consumer cannot close itself.")
-        thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-        if thread.is_alive():
-            logger.error(
-                "Drasi inbox consumer did not stop before its shutdown deadline."
-            )
-            raise DrasiDeliveryError("The Drasi inbox consumer did not stop in time.")
-
-    return close
+    return DrasiInbox(
+        config=config,
+        admission=admission,
+        dapr_client=dapr_client,
+        workflow_client=workflow_client,
+    )

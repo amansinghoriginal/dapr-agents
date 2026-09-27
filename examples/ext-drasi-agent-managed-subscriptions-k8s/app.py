@@ -15,17 +15,19 @@
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
 
-from dapr_agents import AgentRunner, DurableAgent, OpenAIChatClient
+from dapr_agents import DurableAgent, OpenAIChatClient
 from dapr_agents.agents.configs import (
     AgentExecutionConfig,
     AgentPubSubConfig,
     AgentStateConfig,
 )
-from dapr_agents.ext.drasi import enable_drasi_subscriptions
+from dapr_agents.ext.drasi import drasi_subscription_lifecycle
 from dapr_agents.storage.daprstores.stateservice import StateStoreService
 
 from actions import make_assessment_tool
@@ -73,7 +75,6 @@ def make_agent(settings: ModelSettings, *, service: str) -> DurableAgent:
         state=AgentStateConfig(store=StateStoreService(store_name=STATE_STORE_NAME)),
         execution=AgentExecutionConfig(max_iterations=8),
     )
-    enable_drasi_subscriptions(agent, router_id=ROUTER_ID, namespace=NAMESPACE)
     return agent
 
 
@@ -86,19 +87,27 @@ def main() -> None:
         raise ValueError("This reference catalog requires ASSESSMENT_SERVICE=checkout.")
 
     agent = make_agent(ModelSettings.from_env(), service=service)
-    runner = AgentRunner()
-    application = FastAPI(title="Agent-managed Drasi reference demo")
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        async with drasi_subscription_lifecycle(
+            agent,
+            router_id=ROUTER_ID,
+            namespace=NAMESPACE,
+            app=application,
+        ):
+            yield
+
+    application = FastAPI(
+        title="Agent-managed Drasi reference demo",
+        lifespan=lifespan,
+    )
 
     @application.get("/healthz")
     def health() -> dict[str, str]:
         return {"status": "ready"}
 
-    try:
-        # Preparation and worker startup finish before HTTP readiness is served.
-        runner.serve(agent, app=application)
-        uvicorn.run(application, host="0.0.0.0", port=8001, log_level="info")
-    finally:
-        runner.shutdown(agent)
+    uvicorn.run(application, host="0.0.0.0", port=8001, log_level="info")
 
 
 if __name__ == "__main__":

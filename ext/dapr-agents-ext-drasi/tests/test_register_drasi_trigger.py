@@ -92,13 +92,21 @@ def _get_attr_from_wf_input_metadata(kwargs: dict[str, Any], name: str) -> str |
     )
 
 
-# TODO: tests may still be flaky with this workaround, will need to be replaced
-async def _wait_for_completion() -> None:
-    """
-    Short sleep to allow background workflow scheduling to complete.
-    Call this after runner entrypoint methods (`subscribe()`/`register_routes()`/`serve()`) and before assertions.
-    """
-    await asyncio.sleep(0.2)
+async def _wait_for_schedule_count(
+    scheduler: MagicMock,
+    expected: int,
+    *,
+    timeout: float = 3.0,
+) -> None:
+    """Wait for the asynchronous subscription worker to reach its postcondition."""
+    if expected == 0:
+        await asyncio.sleep(0.2)
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while scheduler.call_count < expected and loop.time() < deadline:
+        await asyncio.sleep(0.01)
+    assert scheduler.call_count >= expected
 
 
 @contextmanager
@@ -461,7 +469,7 @@ async def test_register_drasi_trigger_uses_pubsub_under_subscribe(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -547,7 +555,7 @@ async def test_register_drasi_trigger_uses_pubsub_under_register_routes(setup_de
     )
     runner.register_routes(agent, fastapi_app=FastAPI())
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -632,7 +640,7 @@ async def test_register_drasi_trigger_uses_pubsub_under_serve(setup_deps):
     )
     runner.serve(agent, app=FastAPI())
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -730,7 +738,7 @@ async def test_register_drasi_trigger_uses_pubsub_independent_of_agent_pubsub(
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -808,7 +816,7 @@ async def test_register_drasi_trigger_defaults_to_agent_pubsub_component(setup_d
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -899,7 +907,7 @@ async def test_register_drasi_trigger_defaults_to_derived_topic(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -989,7 +997,7 @@ async def test_register_drasi_trigger_defaults_to_passthrough_task(setup_deps, c
     with caplog.at_level(logging.WARNING):
         runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     # Ensure that a human-readable warning is logged
     assert "no task mapper" in caplog.text.lower()
@@ -1074,7 +1082,7 @@ async def test_register_drasi_trigger_filters_by_query_id(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 1)
 
     assert wf_scheduler_method.call_count == 1
 
@@ -1158,7 +1166,7 @@ async def test_register_drasi_trigger_filters_by_enum_operation(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 1)
 
     assert wf_scheduler_method.call_count == 1
 
@@ -1242,7 +1250,7 @@ async def test_register_drasi_trigger_filters_by_string_literal_operation(setup_
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 1)
 
     assert wf_scheduler_method.call_count == 1
 
@@ -1348,7 +1356,7 @@ async def test_register_drasi_trigger_filters_by_enum_operations(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -1454,7 +1462,7 @@ async def test_register_drasi_trigger_filters_by_string_literal_operations(setup
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -1561,7 +1569,7 @@ async def test_register_drasi_trigger_filters_by_mixed_operations(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
 
@@ -1712,7 +1720,7 @@ async def test_register_drasi_trigger_filters_by_change_model(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 3)
 
     assert wf_scheduler_method.call_count == 3
 
@@ -1777,7 +1785,7 @@ async def test_register_drasi_trigger_ignores_events_without_change_data(
     with caplog.at_level(logging.WARNING):
         runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 0)
 
     # Ensure that a human-readable warning is logged
     assert "no change data" in caplog.text.lower()
@@ -1830,7 +1838,7 @@ async def test_register_drasi_trigger_ignores_malformed_events(setup_deps):
     )
     runner.subscribe(agent)
 
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 0)
 
     # Should gracefully handle malformed events
     assert wf_scheduler_method.call_count == 0
@@ -2310,12 +2318,14 @@ def test_public_exports():
 
     assert set(drasi.__all__) == {
         "register_drasi_trigger",
-        "enable_drasi_subscriptions",
+        "drasi_subscription_lifecycle",
+        "DrasiSubscriptionLifecycle",
+        "DrasiLifecycleError",
         "DrasiChangeEvent",
         "DrasiOperation",
     }
     assert not hasattr(drasi, "drasi_trigger")
-    assert callable(drasi.enable_drasi_subscriptions)
+    assert callable(drasi.drasi_subscription_lifecycle)
 
 
 def test_router_contract_dependency():
@@ -2361,7 +2371,7 @@ async def test_register_drasi_trigger_allows_multiple_queries(setup_deps):
         )
 
     runner.subscribe(agent)
-    await _wait_for_completion()
+    await _wait_for_schedule_count(wf_scheduler_method, 2)
 
     assert wf_scheduler_method.call_count == 2
     assert {

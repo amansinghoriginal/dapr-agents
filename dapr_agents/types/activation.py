@@ -48,10 +48,6 @@ class ActivationContext:
     per agent the first time the agent is attached, and passes it to each
     callback registered via :meth:`DurableAgent.add_activation`.
 
-    Callbacks registered with ``before_start=True`` complete before the workflow
-    worker starts. Their Dapr clients are usable, but they must not wait for
-    workflow execution. The default callbacks retain their post-start behavior.
-
     Attributes:
         agent: The agent being hosted.
         runner: The ``AgentRunner`` hosting the agent. Use

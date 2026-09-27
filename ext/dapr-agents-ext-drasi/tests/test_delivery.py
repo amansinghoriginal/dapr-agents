@@ -468,7 +468,7 @@ def test_real_admission_ignores_outer_publication_identity_and_rejects_double_en
     assert repository.load() == original
 
 
-def test_subscribes_to_derived_inbox_and_dlt_and_closes_only_the_consumer(
+def test_subscribes_to_derived_inbox_and_dlt_and_owns_the_dapr_client(
     config: ResolvedDrasiConfig,
     admission: Mock,
     client: MagicMock,
@@ -488,7 +488,7 @@ def test_subscribes_to_derived_inbox_and_dlt_and_closes_only_the_consumer(
     close()
     assert stream.closed.is_set()
     assert stream.close_count == 1
-    client.close.assert_not_called()
+    client.close.assert_called_once()
     client.publish_event.assert_not_called()
     workflow.close.assert_not_called()
     admission.admit.assert_not_called()
@@ -723,7 +723,7 @@ def test_thread_startup_failure_closes_the_opened_subscription(
     assert stream.close_count == 1
 
 
-def test_close_failure_is_explicit_and_cleanup_can_be_retried(
+def test_close_attempts_transport_and_subscription_independently(
     config: ResolvedDrasiConfig,
     admission: Mock,
     client: MagicMock,
@@ -743,15 +743,19 @@ def test_close_failure_is_explicit_and_cleanup_can_be_retried(
         original_close()
 
     mocker.patch.object(stream, "close", side_effect=close_stream)
+    client.close.side_effect = stream.close
     close = subscribe_drasi_inbox(
         config=config, admission=admission, dapr_client=client, workflow_client=workflow
     )
-    try:
-        with pytest.raises(DrasiDeliveryError, match="Could not close"):
-            close()
-    finally:
+    with pytest.raises(DrasiDeliveryError, match="Dapr client"):
         close()
+    assert not close.is_closed
+    assert close.is_stopped
+    close()
+    assert close.is_closed
     assert stream.closed.is_set()
+    assert attempts >= 2
+    assert stream.close_count == 1
     assert "SENTINEL" not in caplog.text
 
 
@@ -878,10 +882,14 @@ def test_shutdown_timeout_is_explicit_and_inflight_work_is_not_acknowledged(
         assert entered.wait(timeout=5)
         with pytest.raises(DrasiDeliveryError, match="did not stop in time"):
             close()
+        assert not close.is_stopped
+        assert not close.is_closed
     finally:
         monkeypatch.setattr(delivery, "_SHUTDOWN_TIMEOUT_SECONDS", 5)
         accepted.set()
         close()
+    assert close.is_stopped
+    assert close.is_closed
     assert stream.responses.empty()
 
 

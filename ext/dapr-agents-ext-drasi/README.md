@@ -38,14 +38,14 @@ Installing this source version requires Git and access to the public Drasi Platf
 
 ```python
 from dapr_agents.ext.drasi import (
-    register_drasi_trigger,         # Register author-configured Drasi query triggers
-    enable_drasi_subscriptions,     # Enable agent-managed persistent subscriptions
-    DrasiChangeEvent,               # Type for Drasi change events
-    DrasiOperation,                 # Operation type for Drasi change events
+    register_drasi_trigger,          # Register author-configured Drasi query triggers
+    drasi_subscription_lifecycle,    # Host agent-managed persistent subscriptions
+    DrasiChangeEvent,                # Type for Drasi change events
+    DrasiOperation,                  # Operation type for Drasi change events
 )
 ```
 
-`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias and preserves the existing unpacked change-event format and task-mapping behavior. `enable_drasi_subscriptions()` provides the alternative agent-managed mode.
+`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias and preserves the existing unpacked change-event format and task-mapping behavior. `drasi_subscription_lifecycle()` provides the alternative agent-managed mode as a one-shot async context.
 
 ### Author-configured triggers
 
@@ -70,44 +70,51 @@ finally:
 
 ### Agent-managed subscriptions
 
-Configure an ordinary `DurableAgent` with its LLM, action tools, `AgentStateConfig.store`, and Pub/Sub component, then enable subscriptions before hosting it:
+Configure an ordinary `DurableAgent` with its LLM, action tools, `AgentStateConfig.store`, and Pub/Sub component. The lifecycle prepares Drasi and yields an ordinary `AgentRunner`:
 
 ```python
-enable_drasi_subscriptions(
+async with drasi_subscription_lifecycle(
     agent,
     router_id="drasi-system/sre-router-reaction",
     namespace="applications",
-)
-
-runner = AgentRunner()
-try:
+) as runner:
     await runner.run(
         agent,
         {"task": "Monitor service errors and record an assessment when they change."},
         wait=False,
     )
     await wait_for_shutdown()
-finally:
-    runner.shutdown(agent)
 ```
 
-`router_id` is the router's `<namespace>/<app-id>` identity. `namespace` is the subscriber application's namespace and must be supplied explicitly. Application ID, exact logical agent name, runtime state store, and workflow name come from the agent. `pubsub=` optionally overrides the agent's bus; `dapr_http_port=` optionally overrides the SDK's `DAPR_HTTP_PORT` setting. Neither the state component nor subscriber identity is chosen by the LLM.
+For an application-owned FastAPI service, pass the app to make `serve()` the first normal hosting operation. This preserves the activation context, default agent service routes, streaming/input routes, Pub/Sub wiring, and HITL endpoints:
 
-Registration performs no network I/O. At hosting time the extension verifies sidecar identity/components, retrieves the catalog, checks tool-name collisions, initializes genuinely absent intent, and reconciles saved intent. It attaches generated tools and opens the derived inbox/DLT before the workflow worker starts. Preparation runs after the agent's startup configuration is loaded; changing the registered identity or infrastructure fails explicitly. An empty catalog still exposes `list_drasi_subscriptions()`.
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with drasi_subscription_lifecycle(
+        agent,
+        router_id="drasi-system/sre-router-reaction",
+        namespace="applications",
+        app=app,
+    ):
+        yield
 
-Generated tools are added to the existing executor without rebuilding prompts or replacing ordinary tools. They remain available in independent event workflows. An initially tool-less agent gets automatic tool selection unless its original configuration supplied another policy, such as `none` or `required`; explicit author policies are preserved. This capability requires the ordinary chat/tool loop and an agent-owned workflow runtime: omit `runtime=` and let the runner control startup/shutdown. External `executor=` runtimes, application-supplied workflow runtimes, and orchestrators are rejected rather than silently enabling an unsafe or unusable capability. No special startup model turn is performed.
+app = FastAPI(lifespan=lifespan)
+```
 
-Use one Drasi-enabled logical agent per Dapr application and one reference application replica. Static and dynamic registration cannot be mixed, and dynamic enablement cannot be repeated on one agent. A process-local guard assigns each known application ID to one Drasi agent for the process lifetime; shutdown does not transfer ownership to another agent. This does not enforce the restriction across processes or deployments. Multiple static query registrations on one agent remain supported.
+`router_id` is the router's `<namespace>/<app-id>` identity. `namespace` is the subscriber application's namespace and must be supplied explicitly. Application ID, exact logical agent name, runtime state store, and workflow name come from the agent. `pubsub=` optionally overrides the agent's bus, `dapr_http_port=` overrides the local sidecar HTTP port, and bounded router/startup timeouts have explicit parameters. Neither the state component nor subscriber identity is chosen by the LLM.
+
+Startup revalidates the supported profile on context entry, runs public MCP discovery, revalidates again, resolves configuration, loads the catalog, collision-checks all generated tools, performs one final pre-mutation validation, initializes and reconciles durable intent, attaches tools, performs normal hosting, verifies `WorkflowRuntime.wait_for_worker_ready()`, and finally opens the derived inbox/DLT. An empty catalog still exposes `list_drasi_subscriptions()`. No special startup model turn is performed.
+
+Generated tools are added to the existing executor without replacing author tools or prompts. They remain available in independent event workflows. Initially tool-less agents are supported: the framework's explicit `none` and `required` choices are preserved, while the normal default becomes `auto` once tools exist.
+
+The initial dynamic profile requires a fresh agent constructed without `runtime=`. Do not share or replace that runtime. Runtime ownership is a documented caller precondition because the current public framework API cannot inspect it. Dynamic mode also rejects `RuntimeSubscriptionConfig` and pre-existing activation callbacks. These are initial integration restrictions, not framework-wide rules. External `executor=` runtimes and orchestrators are also unsupported.
+
+Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. If cleanup reports an unresolved owned resource, call `await lifecycle.aclose()` to retry only that cleanup; this never rehosts the agent. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
+
+The lifecycle creates and yields its runner. `workflow_client=` may inject a caller-owned workflow client; the runner does not close injected clients. The dynamic inbox owns a dedicated Dapr client created through `agent.client_factory`. Shutdown marks intake intentional, closes dynamic and runner Pub/Sub transports to unblock their streams, joins consumers, drains workflow execution, lets the runner perform its normal cleanup, then closes router resources. If an inbox thread may still be active or runtime shutdown is unresolved, dependent clients, router resources, and the application guard remain owned for a later `aclose()` attempt. It never unsubscribes or deletes durable intent. If application code raises or is cancelled, cleanup diagnostics are attached without replacing the original exception or cancellation.
 
 The intent component must support ETags and honor strong reads. State/router errors fail preparation instead of producing an empty subscription set. Tool-name collisions and missing state, bus, or router configuration are actionable errors, not partially usable capabilities.
-
-Drasi supports one hosting lifecycle per registration. Repeated hosting calls while the agent is running are idempotent, including `serve()` calling `subscribe()`. Once Drasi preparation begins, startup failure or shutdown is terminal for that registration: restart the application with fresh agent/runner objects rather than reusing stopped SDK runtimes or closed clients. A new process reloads persisted intent and reconciles pending operations. No migration or in-process runtime reconstruction is involved.
-
-Failed preparation closes acquired resources and removes only the generated tools it attached. Normal shutdown closes the inbox/router and detaches those tools without unsubscribing or deleting durable intent. The runner owns its Dapr/workflow clients; the agent retains its state store. A failed prepared-runtime shutdown is reported and retains potentially live-worker dependencies rather than falsely marking the agent stopped. Incomplete inbox cleanup is also reported and retains its dependencies for another shutdown attempt, not rehosting. Background consumer failures are logged when they occur; once the consumer is confirmed stopped, its earlier failure does not block cleanup. Recover event intake by restarting the application.
-
-Static triggers continue using the framework's existing best-effort subscription shutdown. Their wrapper attempts every closer and propagates errors it receives; underlying daemon-consumer cleanup still relies on process exit when it cannot finish. Application ownership remains fixed, so static shutdown is not permission to host a replacement agent in the same process.
-
-`run()` and `run_stream()` await offloaded preparation. Synchronous hosting methods remain blocking; when using them from an async application, await `asyncio.to_thread(runner.workflow, agent)` or the corresponding synchronous hosting call.
 
 ### Examples
 - [Drasi Change-Driven Agents on Kubernetes](../../examples/ext-drasi-change-driven-agents-k8s/README.md) — demonstrates how to subscribe an agent to Drasi queries in a Kubernetes environment.
@@ -140,7 +147,7 @@ See the `Code Quality` section in the [development README](../../docs/developmen
 
 ### Agent-managed internal contracts
 
-`_models.py` and `_interfaces.py` define the private component contracts. The public `enable_drasi_subscriptions()` helper composes their completed implementations. Changes to these shared contracts and fixtures belong in one coordinated foundation follow-up, rather than conflicting edits in individual lanes.
+`_models.py` and `_interfaces.py` define the private component contracts. The public `drasi_subscription_lifecycle()` context composes their completed implementations. Changes to these shared contracts and fixtures belong in one coordinated foundation follow-up, rather than conflicting edits in individual lanes.
 
 #### Configuration and ownership
 
@@ -150,7 +157,7 @@ See the `Code Quality` section in the [development README](../../docs/developmen
 
 All domain methods are synchronous and return completed results, not tasks, futures, or enqueue acknowledgements. Blocking state/network I/O belongs in preparation, a subscription worker, or an ordinary tool activity. Async callers must offload blocking calls rather than block their application event loop. Deterministic workflow bodies and replayed hooks must not perform this I/O. R1 owns adaptation to asynchronous MCP machinery, including session/task/loop affinity; this foundation supplies no threading framework and does not assume a session can move between arbitrary event loops.
 
-I1 owns preparation and resource lifetime: prepare the router catalog, initialize/load intent, reconcile the manager, attach tools, and only then admit work. It closes partially prepared resources on failure and closes the inbox and router client on shutdown. Tools and the manager borrow their dependencies; the agent continues to own its configured state-store primitive. `RouterClient.close()` is idempotent and releases runtime resources only. Shutdown never removes intent or router rules.
+I1 owns preparation and resource lifetime: discover MCP tools, prepare the router catalog, initialize/load intent, reconcile the manager, attach tools, verify worker readiness, and only then admit inbox work. It closes partially prepared resources on failure. The inbox owns a dedicated Dapr client; tools and the manager borrow their router and state dependencies. The agent continues to own its configured state-store primitive. `RouterClient.close()` is idempotent and releases runtime resources only. Shutdown never removes intent or router rules.
 
 #### Component signatures
 
@@ -237,13 +244,13 @@ The private `DrasiAdmissionHandler(scope=..., intents=...)` in `admission.py` im
 
 D2 maps these results to transport responses and schedules the configured workflow. A `SchedulingInput` is **not** an acknowledgement: success follows scheduling acceptance or an explicit existing-active-instance conflict, not local enqueue or workflow completion. Arbitrary scheduler errors retry. Duplicate workflows after terminal ID reuse remain possible.
 
-The private `delivery.subscribe_drasi_inbox(config=..., admission=..., dapr_client=..., workflow_client=...)` opens the derived inbox and DLT on the configured application Pub/Sub component and returns a closer. It decodes the SDK message's raw CloudEvent **data** without using the outer publication ID as workflow identity. A single consumer waits for `schedule_new_workflow()` acceptance before responding; it never waits for workflow completion or deduplicates against a local cache. Only the scheduler's structured gRPC `ALREADY_EXISTS` conflict is acknowledged as an existing active instance. Other errors or mismatched scheduling confirmations request retry.
+The private `delivery.subscribe_drasi_inbox(config=..., admission=..., dapr_client=..., workflow_client=...)` opens the derived inbox and DLT on the configured application Pub/Sub component and returns an owned inbox handle. It decodes the SDK message's raw CloudEvent **data** without using the outer publication ID as workflow identity. A single consumer waits for `schedule_new_workflow()` acceptance before responding; it never waits for workflow completion or deduplicates against a local cache. Only the scheduler's structured gRPC `ALREADY_EXISTS` conflict is acknowledged as an existing active instance. Other errors or mismatched scheduling confirmations request retry.
 
 Poison input, including JSON that exceeds the decoder's nesting limit, returns `DROP` on a subscription with its derived `dead_letter_topic` configured, instructing Dapr to forward the original message to that DLT without terminating the consumer. The adapter does not independently republish another copy. Intentional discards return `SUCCESS`; pending/infrastructure failures return `RETRY`. Configure the broker and Dapr inbound resiliency policy for the desired retry budget: retry exhaustion and DLT publication failure remain runtime/broker concerns, not a loss-free-delivery promise.
 
 The pinned SDK buffers acknowledgement responses and logs rather than propagates `respond()` failures; its return is not proof of broker receipt. The adapter does not record a response as permanently delivered or suppress redelivery. An inactive SDK stream is surfaced by the next read and the closer; otherwise missing responses are governed by the configured runtime/broker timeout and retry policies. A redelivered event is admitted and scheduled again, including the normal active-ID conflict handling.
 
-The closer cancels the streaming subscription and joins its consumer without closing the borrowed clients or changing durable intent/router rules. Final consumer cleanup closes the SDK's current stream again, including any replacement opened by an in-flight reconnect. The closer is idempotent after successful shutdown. Stream/consumer failures are logged immediately; the closer reports only failure to close the current stream or stop the consumer, not historical health errors after termination is confirmed. A consumer still running after the ten-second shutdown deadline raises `DrasiDeliveryError`. Long-running SDK calls must be bounded by deployment timeout/resiliency settings; shutdown does not cancel accepted workflows.
+The inbox handle marks shutdown intentional, closes its owned Dapr client to interrupt the streaming iterator, closes the SDK's current subscription, and joins its consumer. Final consumer cleanup closes the current stream again, including any replacement opened by an in-flight reconnect. It records transport, subscription, and consumer completion separately; a later `close()` retries only unresolved resources. Stream/consumer failures are logged immediately. A consumer still running after the ten-second shutdown deadline raises `DrasiDeliveryError` and remains the lifecycle's responsibility. Long-running SDK calls must be bounded by deployment timeout/resiliency settings; shutdown does not cancel accepted workflows.
 
 #### Shared fixtures and lane ownership
 
@@ -258,15 +265,15 @@ Extension-local `tests/conftest.py` and `tests/fakes.py` provide contract-backed
 | T1 | `subscription_tools.py`: schemas/descriptions and delegation to the manager |
 | D1 | `admission.py`, `task_builder.py`: persistent read, classification and detached event task |
 | D2 | `delivery.py`: inbox/DLT lifecycle, transport dispositions and scheduling acceptance |
-| I1 | Completed activation/composition, tool attachment, mode exclusion and public export |
+| I1 | One-shot lifecycle composition, tool attachment, mode exclusion and public export |
 
-Composition uses `DurableAgent.add_activation(..., before_start=True)`. Preparation completes after startup configuration and workflow registration but before worker execution; existing activation callbacks retain their default post-start behavior. Every runner hosting path, including streaming, participates in attachment and cleanup. Generated tools are removed by instance identity through `AgentToolExecutor.unregister_tool()` so rollback cannot remove an ordinary same-name replacement. Delivery uses the extension-owned adapter rather than the generic filter/mapper path.
+Composition is extension-owned rather than an activation hook. Dynamic mode rejects runtime configuration subscriptions and pre-existing activation callbacks, prepares before the first normal hosting call, verifies worker readiness, and opens the inbox last. Generated tools remain attached because failed or stopped agent/runner objects are one-shot and are not reused. Delivery uses the extension-owned adapter rather than the generic filter/mapper path.
 
 #### Generated subscription tools
 
 The private `subscription_tools.build_subscription_tools(catalog, manager)` factory returns ordinary synchronous `AgentTool` objects without performing network/state I/O or changing an agent. Each cached query gets subscribe/unsubscribe tools with bounded, deterministic names containing a digest of the exact query ID. Subscribe accepts only explicit, distinct `i/u/d` operations and non-blank, self-contained handling instructions. `list_drasi_subscriptions()` is always present, including for an empty catalog, and reports local intent rather than live router state.
 
-The tools borrow the F2 management interface and preserve classified command failures as error results, including the unsubscribe-before-resubscribe guidance for retained unavailable intent. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. The public enablement helper owns attachment to the existing executor, collision checks, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
+The tools borrow the F2 management interface and preserve classified command failures as error results, including the unsubscribe-before-resubscribe guidance for retained unavailable intent. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. The public lifecycle owns attachment to the existing executor, collision checks, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
 
 ### Regenerate Drasi models
 
