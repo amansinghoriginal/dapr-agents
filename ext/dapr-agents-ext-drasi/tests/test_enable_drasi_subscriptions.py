@@ -492,7 +492,8 @@ def test_initially_toolless_agent_retains_its_explicit_tool_policy(
     harness: _Harness, choice: str
 ) -> None:
     agent = harness.make_agent("InitiallyToolless", [], tool_choice=choice)
-    assert agent.execution.tool_choice is None
+    inactive_choice = None if choice == "auto" else choice
+    assert agent.execution.tool_choice == inactive_choice
     enable_drasi_subscriptions(
         agent, router_id=harness.scope.router_id, namespace=harness.scope.namespace
     )
@@ -500,7 +501,7 @@ def test_initially_toolless_agent_retains_its_explicit_tool_policy(
     assert agent.execution.tool_choice == choice
     assert len(agent.get_llm_tools()) == 5
     harness.runner.shutdown(agent)
-    assert agent.execution.tool_choice is None
+    assert agent.execution.tool_choice == inactive_choice
 
 
 def test_borrowed_runtime_is_rejected_before_any_registration(harness: _Harness):
