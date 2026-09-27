@@ -275,6 +275,12 @@ class AgentRunner(WorkflowRunner):
         """Schedule an agent workflow and yield ``AgentStreamChunk`` until
         ``SESSION_COMPLETE`` or the workflow reaches a terminal state.
 
+        Initialization is lazy: MCPServer discovery and activation callbacks run
+        when iteration begins, before the stream consumer starts and the workflow
+        is scheduled. Initialization failures propagate from that first iteration.
+        Closing the iterator releases only its stream consumer; agent activation
+        resources remain attached until ``shutdown()``.
+
         Args:
             agent: Durable agent whose workflow entry to invoke.
             payload: Workflow input (dict preferred so streaming metadata can be
@@ -1477,7 +1483,25 @@ class AgentRunner(WorkflowRunner):
     # Activation hooks (extension seam)
     # ------------------------------------------------------------------
     def _attach_agent(self, agent: DurableAgent, app: Optional[FastAPI] = None) -> None:
-        """Start, register, and activate an agent for hosting once per agent."""
+        """Start, register, and activate an agent for hosting once per agent.
+
+        Shared by every host entry point (run/run_stream/workflow/register_routes/
+        subscribe/serve). It starts the agent's runtime, records it in
+        ``_managed_agents``, and fires its activation callbacks exactly once.
+        Re-hosting the same agent (e.g. the nested ``serve() -> subscribe()`` path,
+        direct streaming after ``serve()``, or a retry) is a no-op for the
+        already-started/managed/activated agent.
+
+        Callbacks run outside ``self._lock`` so a callback may safely re-enter the
+        runner; returned closers are tracked for teardown by ``shutdown()``. If
+        activation fails, only what this call created is unwound (a pre-existing
+        host or shared runtime is left intact) before the error is re-raised.
+
+        Args:
+            agent: The agent being hosted.
+            app: FastAPI app exposed on the context, only under serve()/
+                register_routes(); ``None`` otherwise.
+        """
 
         started_here = False
         try:
@@ -1502,6 +1526,9 @@ class AgentRunner(WorkflowRunner):
 
         collected: List[Callable[[], None]] = []
         try:
+            # Extensions may open a streaming subscription, so guarantee a Dapr
+            # client even under workflow()/run()/run_stream(), which never wire
+            # pub/sub.
             self._ensure_dapr_client()
             if self._dapr_client is None:
                 raise RuntimeError(

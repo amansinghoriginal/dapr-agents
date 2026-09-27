@@ -525,11 +525,11 @@ class DurableAgent(AgentBase):
 
         The callback runs exactly once the first time the agent is attached to
         an ``AgentRunner`` via any host entry point (``serve()``, ``subscribe()``,
-        ``register_routes()``, ``workflow()``, ``run()`` or ``run_stream()``). It receives an
-        :class:`~dapr_agents.types.activation.ActivationContext` and may return a
-        zero-arg closer that the runner invokes on shutdown. Callbacks fire in
-        registration order. This is the supported seam for trigger extensions and
-        never modifies the agent's workflow.
+        ``register_routes()``, ``workflow()``, ``run()`` or ``run_stream()``). It
+        receives an :class:`~dapr_agents.types.activation.ActivationContext` and
+        may return a zero-arg closer that the runner invokes on shutdown.
+        Callbacks fire in registration order. This is the supported seam for
+        trigger extensions and never modifies the agent's workflow.
 
         Args:
             callback: Callable taking an ``ActivationContext`` and returning an
