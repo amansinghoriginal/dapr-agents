@@ -17,7 +17,7 @@ Credential-free integration coverage for [amansinghoriginal/dapr-agents#15](http
 
 The model is a local scripted HTTP fixture, not an external LLM. It deterministically invokes the generated subscription-list tool and the agent's ordinary `record_event` tool through the normal durable chat/tool loop. The temporary receiver records actions for inspection; it is not the autonomous demonstration or a production idempotency service.
 
-The suite injects packed, non-aggregation query-result fixtures through the router's real inbound Pub/Sub component. It does not install the Drasi query engine or validate Kubernetes installation. Real query generation, autonomous query choice, and an idempotent external business action belong to I3.
+The suite injects packed, non-aggregation query-result fixtures through the router's real inbound Pub/Sub component. It does not install the Drasi query engine or validate Kubernetes installation. The [Kubernetes reference example](../../../examples/ext-drasi-agent-managed-subscriptions-k8s/README.md) covers real query generation, autonomous query choice, and an idempotent external business action.
 
 ## Run
 
@@ -129,9 +129,9 @@ docker compose \
 
 Once all of that session's projects are down, abandoned test images can be removed with `docker image rm` using only the two exact image references from `compose.env`. Do not delete resources by a broad prefix or use `docker system prune`, `dapr uninstall`, or cluster-wide cleanup.
 
-This directory owns its harness, fixtures, and local operating instructions. I4 owns any root workspace/lockfile changes, shared CI wiring, and broader documentation links. The I3 example directory is not modified.
+This directory owns its harness, fixtures, and local operating instructions. Shared CI and dependency locks remain repository-level concerns, while the Kubernetes reference example keeps its deployment-specific workspace separate.
 
-Shared-tooling handoff to I4: pin or align mypy's automatically installed stub dependencies with its configured Python 3.11 target. Repeated type checks under a newer interpreter can install Python-3.12-only stubs and upgrade locked runtime packages. The repository checks for this change use Python 3.11; the real-runtime suite also runs from Python 3.13 and hosts the applications in Python 3.12 containers.
+Repository type checking uses its configured Python 3.11 target. Repeated mypy runs under a newer interpreter can install newer stub packages into the active environment, so recreate the documented development environment before comparing type-check results. The real-runtime suite also runs from Python 3.13 and hosts the applications in Python 3.12 containers.
 
 ## Prior art
 

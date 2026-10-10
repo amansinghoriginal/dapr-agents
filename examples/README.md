@@ -259,18 +259,31 @@ This example shows how to deploy agents with full observability on Kubernetes, i
 
 ## Extension Examples
 
-### Drasi Change-Driven Agents on Kubernetes
+### Author-Configured Drasi Triggers on Kubernetes
 
-Demonstrates how Dapr Agents can react to real-time data changes detected by Drasi, using Dapr Pub/Sub as the delivery mechanism:
+Demonstrates fixed, application-authored subscriptions to Drasi query changes using Dapr Pub/Sub:
 
 - **Change Detection**: Drasi continuously watches a data source for changes satisfying a user-defined query
 - **Event Publishing**: Detected changes are published to a Dapr Pub/Sub topic
-- **Agent Subscription**: An agent subscribes to a Drasi query and reacts to incoming change events
+- **Author Configuration**: The application selects query IDs and maps events to agent tasks before hosting
 - **Kubernetes Deployment**: Run Drasi and Dapr Agents together on Kubernetes for an end-to-end reactive pipeline
 
 This example shows how to build an inventory agent that automatically creates purchase orders for products that dip below user-defined stock thresholds, demonstrating how the Drasi extension enables reliable, business event-driven agentic systems on Kubernetes.
 
-[Go to Drasi Change-Driven Agents on Kubernetes](./ext-drasi-change-driven-agents-k8s)
+[Go to Author-Configured Drasi Triggers](./ext-drasi-change-driven-agents-k8s)
+
+### Agent-Managed Drasi Subscriptions on Kubernetes
+
+Demonstrates an agent selecting persistent monitoring from an operator-curated Drasi query catalog at runtime:
+
+- **Dynamic Selection**: The model chooses generated subscription tools without application fallback logic
+- **Durable Intent**: Handling instructions and subscription state survive ordinary restarts
+- **Independent Workflows**: Later query changes start new workflows after the original task finishes
+- **Operational Lifecycle**: Inspect, update, unsubscribe, and clean up the isolated reference environment
+
+The example uses PostgreSQL, the built-in `DaprAgentRouter`, a separate application broker, and an idempotent service-assessment action.
+
+[Go to Agent-Managed Drasi Subscriptions](./ext-drasi-agent-managed-subscriptions-k8s)
 
 ### Contributing to Dapr Agents Examples
 

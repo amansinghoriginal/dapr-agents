@@ -59,7 +59,7 @@ Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Ma
 
 Use the listed CLI versions when reproducing this environment; setup checks tool availability, not exact installed versions. Other images use explicit version tags, which registries can republish. This reference setup does not claim hermetic or bit-for-bit image reproducibility.
 
-This directory has an isolated uv workspace and lockfile so it can run before the later shared workspace/CI/documentation handoff. It installs the core and extension from this repository checkout. Do not replace them with a released package that lacks `drasi_subscription_lifecycle()`.
+This directory intentionally keeps an isolated uv workspace and lockfile. The example fixes Python 3.12 and its deployment tooling independently of the repository-wide workspace, while installing the core and extension from this checkout. The published `dapr-agents-ext-drasi==0.1.0` package does not contain `drasi_subscription_lifecycle()`.
 
 ## Model configuration
 
@@ -191,7 +191,7 @@ DEMO_TEST_POSTGRES=1 uv run --locked pytest tests/test_assessment_database.py
 
 The PostgreSQL test creates and removes its own uniquely named container with a loopback-only random port. It proves repeated and concurrent writes retain one object and that a duplicate raw insert is rejected by the database. It does not connect to an existing database. The full model/Drasi walkthrough is `demo.py exercise`, not the unit suite.
 
-Shared workspace registration, root lockfiles, CI, and top-level documentation are deliberately unchanged here and belong to the composition epic's later handoff.
+The isolated workspace is intentional. Repository CI validates the core and extension packages, while the commands above validate the example's own code and dependency lock without coupling it to every root-workspace update.
 
 ## Prior art
 

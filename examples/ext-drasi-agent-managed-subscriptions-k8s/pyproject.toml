@@ -36,7 +36,7 @@ dev = [
 [tool.uv]
 package = false
 
-# Match the integration trunk's SDK compatibility window until I4 integration.
+# Match the feature branch's SDK compatibility window.
 [tool.uv.exclude-newer-package]
 dapr = "2026-05-21T00:00:00Z"
 dapr-ext-fastapi = "2026-05-21T00:00:00Z"
@@ -46,7 +46,7 @@ anthropic = "2026-08-23T00:00:00Z"
 # First-party package published after the default workspace quarantine window.
 drasi-agent-router-contracts = "2026-10-10T00:40:00Z"
 
-# I4 owns registration in the repository-wide workspace.
+# Keep this deployment example isolated with its own lockfile.
 [tool.uv.workspace]
 members = []
 
