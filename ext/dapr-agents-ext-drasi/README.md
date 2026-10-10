@@ -89,14 +89,16 @@ Agent-managed mode requires:
 - A deployed `DaprAgentRouter` with an operator-curated query catalog.
 - Stable Dapr application and agent names.
 
-The lifecycle prepares Drasi, starts the workflow worker, opens event intake only after readiness, and yields an ordinary `AgentRunner`:
+The lifecycle prepares Drasi, starts the workflow worker, opens event intake only after readiness, and yields an ordinary `AgentRunner`. Keep the lifecycle object if the application may need to retry unresolved cleanup:
 
 ```python
-async with drasi_subscription_lifecycle(
+lifecycle = drasi_subscription_lifecycle(
     agent,
     router_id="drasi-system/sre-router-reaction",
     namespace="applications",
-) as runner:
+)
+
+async with lifecycle as runner:
     await runner.run(
         agent,
         {"task": "Monitor service errors and record an assessment when they change."},
@@ -142,7 +144,27 @@ Generated tools are added to the existing executor without replacing author tool
 
 The initial dynamic profile requires a fresh agent constructed without `runtime=`. Do not share or replace that runtime. Runtime ownership is a documented caller precondition because the current public framework API cannot inspect it. Dynamic mode also rejects `RuntimeSubscriptionConfig` and pre-existing activation callbacks. These are initial integration restrictions, not framework-wide rules. External `executor=` runtimes and orchestrators are also unsupported.
 
-Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. If cleanup reports an unresolved owned resource, call `await lifecycle.aclose()` to retry only that cleanup; this never rehosts the agent. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
+Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
+
+If context exit reports unresolved cleanup, retain the lifecycle object, address the reported dependency or shutdown problem, and retry only cleanup:
+
+```python
+lifecycle = drasi_subscription_lifecycle(
+    agent,
+    router_id="drasi-system/sre-router-reaction",
+    namespace="applications",
+)
+
+try:
+    async with lifecycle as runner:
+        await wait_for_shutdown()
+except Exception:
+    # Retry after addressing the reported cleanup failure.
+    await lifecycle.aclose()
+    raise
+```
+
+`aclose()` never rehosts the agent or removes durable intent and router rules.
 
 The lifecycle creates and yields its runner. `workflow_client=` may inject a caller-owned workflow client; the runner does not close injected clients. The dynamic inbox owns a dedicated Dapr client created through `agent.client_factory`. Shutdown marks intake intentional, closes dynamic and runner Pub/Sub transports to unblock their streams, joins consumers, drains workflow execution, lets the runner perform its normal cleanup, then closes router resources. If an inbox thread may still be active or runtime shutdown is unresolved, dependent clients, router resources, and the application guard remain owned for a later `aclose()` attempt. It never unsubscribes or deletes durable intent. If application code raises or is cancelled, cleanup diagnostics are attached without replacing the original exception or cancellation.
 
