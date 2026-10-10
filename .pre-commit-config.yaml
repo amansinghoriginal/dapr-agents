@@ -88,7 +88,7 @@ repos:
 
       - id: pytest-drasi-extension
         name: Run Drasi extension unit tests
-        entry: uv run --frozen --no-sync pytest
+        entry: env DAPR_AGENTS_REQUIRE_DRASI=1 uv run --frozen --no-sync pytest
         args: [ext/dapr-agents-ext-drasi/tests, -m, "not integration", --tb=short, -q]
         language: system
         pass_filenames: false

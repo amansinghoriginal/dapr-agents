@@ -1483,7 +1483,7 @@ class AgentRunner(WorkflowRunner):
     # Activation hooks (extension seam)
     # ------------------------------------------------------------------
     def _attach_agent(self, agent: DurableAgent, app: Optional[FastAPI] = None) -> None:
-        """Start, register, and activate an agent for hosting once per agent.
+        """Start, register, and activate an agent for hosting — once per agent.
 
         Shared by every host entry point (run/run_stream/workflow/register_routes/
         subscribe/serve). It starts the agent's runtime, records it in
@@ -1492,9 +1492,9 @@ class AgentRunner(WorkflowRunner):
         direct streaming after ``serve()``, or a retry) is a no-op for the
         already-started/managed/activated agent.
 
-        Callbacks run outside ``self._lock`` so a callback may safely re-enter the
+        Callbacks run OUTSIDE ``self._lock`` so a callback may safely re-enter the
         runner; returned closers are tracked for teardown by ``shutdown()``. If
-        activation fails, only what this call created is unwound (a pre-existing
+        activation fails, only what THIS call created is unwound (a pre-existing
         host or shared runtime is left intact) before the error is re-raised.
 
         Args:
@@ -1502,23 +1502,23 @@ class AgentRunner(WorkflowRunner):
             app: FastAPI app exposed on the context, only under serve()/
                 register_routes(); ``None`` otherwise.
         """
-
         started_here = False
         try:
             agent.start()
             started_here = True
         except RuntimeError:
-            # Already started; not ours to stop on rollback.
+            # Already started — idempotent; not ours to stop on rollback.
             pass
 
         with self._lock:
             if id(agent) in self._activated_agent_ids:
-                return
+                return  # already attached; re-host (e.g. serve()->subscribe()) no-ops
             added_here = agent not in self._managed_agents
             if added_here:
                 self._managed_agents.append(agent)
             callbacks = list(agent.activations)
             self._activated_agent_ids.add(id(agent))
+            # Close the registration window so a late add_activation() fails loudly.
             agent._activation_window_open = False
 
         if not callbacks:
@@ -1531,8 +1531,9 @@ class AgentRunner(WorkflowRunner):
             # pub/sub.
             self._ensure_dapr_client()
             if self._dapr_client is None:
+                # Unreachable: _ensure_dapr_client() always sets the client or raises.
                 raise RuntimeError(
-                    "Dapr client unavailable after _ensure_dapr_client()."
+                    "Dapr client unavailable after _ensure_dapr_client(); bug in AgentRunner."
                 )
             context = ActivationContext(
                 agent=agent,
@@ -1559,6 +1560,7 @@ class AgentRunner(WorkflowRunner):
                     )
                 collected.append(closer)
         except Exception:
+            # Unwind only what this call created, then re-raise.
             self._abort_attach(
                 agent, collected, started_here=started_here, added_here=added_here
             )
@@ -1648,7 +1650,7 @@ class AgentRunner(WorkflowRunner):
                 except AttributeError:
                     # this happens if the agent has no instrumentor
                     pass
-                agent.stop()
+                agent.stop()  # This is safe as they'll return None if not started
                 self._close_activations(agent)
             if last:
                 try:

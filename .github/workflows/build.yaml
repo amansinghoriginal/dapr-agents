@@ -26,6 +26,8 @@ on:
       - main
       - feature/*
       - release-*
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 # Refuse any implicit re-resolution. Every `uv sync` / `uv run` uses the
@@ -37,9 +39,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Set up Python 3.11
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: "3.11"
     - name: Install uv
@@ -68,9 +70,9 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Set up Python 3.11
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: "3.11"
     - name: Install uv
@@ -90,9 +92,9 @@ jobs:
       matrix:
         python_ver: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python_ver }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python_ver }}
     - name: Install uv
@@ -101,19 +103,23 @@ jobs:
         version: "latest"
     - name: Install core test dependencies
       run: |
-        uv sync --frozen --group test
+        uv sync --frozen --group test --extra claude
     - name: Run core tests
       run: |
         uv run --frozen --no-sync pytest tests -m "not integration"
     - name: Install Drasi extension test dependencies
       run: |
-        uv sync --frozen --group test --extra drasi \
+        uv sync --frozen --group test --extra drasi --extra claude \
           --config-settings-package dapr-agents:editable_mode=strict \
           --reinstall-package dapr-agents
     - name: Check typing
       run: |
         uv run --frozen --no-sync mypy --config-file mypy.ini
-    - name: Run extension tests
+    # Own session: tests/conftest.py puts the repo root on sys.path, which
+    # hides the installed Drasi extension, and mocks dapr process-wide.
+    - name: Run Drasi extension tests
+      env:
+        DAPR_AGENTS_REQUIRE_DRASI: "1"
       run: |
         uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"
 
@@ -121,11 +127,11 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Set up Python 3.11
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: "3.11"
     - name: Install uv
@@ -136,7 +142,7 @@ jobs:
       run: uv sync --frozen --group test
     - name: Build packages
       env:
-        SETUPTOOLS_SCM_PRETEND_VERSION: "1.0.7.dev0"
+        SETUPTOOLS_SCM_PRETEND_VERSION: "1.0.10.dev0"
       run: |
         uv build --wheel --out-dir dist/core
         uv build --package dapr-agents-ext-drasi --wheel --out-dir dist/drasi

@@ -68,7 +68,7 @@ agent = DurableAgent(...)
 register_drasi_trigger(
     agent,
     query_id="<YOUR_DRASI_QUERY_ID>",
-    task_mapper=lambda event, ctx: TriggerAction(task="<AGENT_TASK_MESSAGE>")
+    task_mapper=lambda event, ctx: TriggerAction(task="<AGENT_TASK_MESSAGE>"),
 )
 
 runner = AgentRunner()

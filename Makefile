@@ -24,13 +24,13 @@ test-core:
 
 test-extension:
 	@echo "Running Drasi extension tests..."
-	$(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v --tb=short
+	DAPR_AGENTS_REQUIRE_DRASI=1 $(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v --tb=short
 
 .PHONY: test-cov
 test-cov:
 	@echo "Running tests with coverage..."
 	$(UV_RUN) pytest tests -m "not integration" -v --cov=dapr_agents --cov-report=
-	$(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v \
+	DAPR_AGENTS_REQUIRE_DRASI=1 $(UV_RUN) pytest $(DRASI_TESTS) -m "not integration" -v \
 		--cov=dapr_agents.ext.drasi --cov-append \
 		--cov-report=term-missing --cov-report=html
 
