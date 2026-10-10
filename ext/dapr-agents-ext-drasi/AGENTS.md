@@ -84,6 +84,9 @@ Notes:
 
 - `dapr_agents.ext.drasi.__init__` re-exports the full public surface shown
     above.
+- These APIs describe the `feature/gsoc-drasi-m2` checkout. The published
+    `dapr-agents-ext-drasi==0.1.0` package predates the renamed static API and
+    agent-managed lifecycle.
 - `types.py` re-exports generated Drasi schema models under extension-specific
     public names, including `DrasiChangeEvent` and `DrasiOperation`.
 - Anything under `activations.py` or `utils/` should be treated as internal
@@ -117,13 +120,15 @@ Notes:
 
 - For shared setup, testing, code quality, and PR guidance, use the root
     [AGENTS.md](../../AGENTS.md).
-- To install the extension in a consuming project:
+- To install the currently released extension, which supports the original
+    author-configured trigger API only:
 
     ```bash
     uv add dapr-agents[drasi]
     ```
 
-- To install the extension in editable mode from the repo root:
+- To use the current feature APIs, install the extension in editable mode from
+    the repo root:
 
     ```bash
     uv venv

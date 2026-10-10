@@ -17,19 +17,23 @@ limitations under the License.
 
 ## Features
 
-- Directly trigger agents from Drasi change events via Dapr pub/sub
-- Let an agent select persistent subscriptions from an operator-curated router catalog
+- Register author-configured Drasi query triggers through Dapr Pub/Sub.
+- Let an agent select persistent subscriptions from an operator-curated router catalog.
 
 ## Getting Started
 
-### Prerequisites
+### Availability
 
-This extension is installed as an optional dependency on the core `dapr-agents` package; see the `Getting Started` section in the [root README](../../README.md) for a list of prerequisites.
+The APIs documented here describe the `feature/gsoc-drasi-m2` checkout. The published `dapr-agents-ext-drasi==0.1.0` package predates this work: it exposes `drasi_trigger()` and does not include `register_drasi_trigger()` or `drasi_subscription_lifecycle()`.
 
-### Installation
+The next extension version has not been selected. Its manifest currently declares `dapr-agents>=1.0.6,<2.0.0`, but the minimum released core version must be confirmed as part of the eventual extension release. No compatibility alias or migration layer is provided for these pre-release API changes.
+
+To use the current APIs, install the feature checkout in editable mode from the repository root:
 
 ```bash
-uv add dapr-agents[drasi]
+uv sync --group dev --group test --extra drasi \
+  --config-settings-package dapr-agents:editable_mode=strict \
+  --reinstall-package dapr-agents
 ```
 
 Agent-managed subscriptions use [`drasi-agent-router-contracts==0.1.0a1`](https://pypi.org/project/drasi-agent-router-contracts/0.1.0a1/), generated from the Drasi Platform TypeSpec source. A local Platform checkout and schema-generation tools are not required. This dependency is not installed by the core framework unless the Drasi extension is selected.
@@ -45,11 +49,18 @@ from dapr_agents.ext.drasi import (
 )
 ```
 
-`register_drasi_trigger()` replaces `drasi_trigger()` without an old-name alias and preserves the existing unpacked change-event format and task-mapping behavior. `drasi_subscription_lifecycle()` provides the alternative agent-managed mode as a one-shot async context.
+The modes are alternatives on one logical agent:
+
+| Mode | Owner of the subscription | Public API | Use when |
+|---|---|---|---|
+| Author-configured | Application author or deployment | `register_drasi_trigger()` | Query IDs and task mapping are fixed before hosting. |
+| Agent-managed | Agent using generated tools | `drasi_subscription_lifecycle()` | The agent selects from an operator-curated router catalog at runtime. |
+
+`register_drasi_trigger()` replaces the pre-release `drasi_trigger()` name without an alias. It preserves the existing unpacked change-event format and task-mapping behavior. Static and agent-managed modes cannot be combined on one agent.
 
 ### Author-configured triggers
 
-Register a Drasi query subscription on an agent before hosting. Call the helper several times to register different fixed queries on the same agent. Static triggers and agent-managed subscriptions cannot be combined on one agent.
+Register a fixed Drasi query on an agent before hosting. Call the helper several times to register different fixed queries on the same agent.
 
 ```python
 agent = DurableAgent(...)
@@ -70,14 +81,26 @@ finally:
 
 ### Agent-managed subscriptions
 
-Configure an ordinary `DurableAgent` with its LLM, action tools, `AgentStateConfig.store`, and Pub/Sub component. The lifecycle prepares Drasi and yields an ordinary `AgentRunner`:
+Agent-managed mode requires:
+
+- A fresh `DurableAgent` using the ordinary LLM/tool loop.
+- `AgentStateConfig.store` backed by a state component that supports ETags and strong reads.
+- An `AgentPubSubConfig` or an explicit `pubsub=` override.
+- A deployed `DaprAgentRouter` with an operator-curated query catalog.
+- Stable Dapr application and agent names.
+
+The lifecycle prepares Drasi, starts the workflow worker, opens event intake only after readiness, and yields an ordinary `AgentRunner`. Keep the lifecycle object if the application may need to retry unresolved cleanup:
 
 ```python
-async with drasi_subscription_lifecycle(
+from dapr_agents.workflow.utils.core import wait_for_shutdown
+
+lifecycle = drasi_subscription_lifecycle(
     agent,
     router_id="drasi-system/sre-router-reaction",
     namespace="applications",
-) as runner:
+)
+
+async with lifecycle as runner:
     await runner.run(
         agent,
         {"task": "Monitor service errors and record an assessment when they change."},
@@ -102,7 +125,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 ```
 
-`router_id` is the router's `<namespace>/<app-id>` identity. `namespace` is the subscriber application's namespace and must be supplied explicitly. Application ID, exact logical agent name, runtime state store, and workflow name come from the agent. `pubsub=` optionally overrides the agent's bus, `dapr_http_port=` overrides the local sidecar HTTP port, and bounded router/startup timeouts have explicit parameters. Neither the state component nor subscriber identity is chosen by the LLM.
+#### Lifecycle configuration
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `router_id` | Required | Router identity in `<namespace>/<app-id>` form. |
+| `namespace` | Required | Namespace of the subscriber application. |
+| `app` | `None` | With a FastAPI app, the lifecycle hosts through `AgentRunner.serve()`; otherwise it starts workflow hosting only. |
+| `workflow_client` | `None` | Optional caller-owned workflow client. Injected clients are not closed by the lifecycle. |
+| `pubsub` | Agent's configured message bus | Application-facing Pub/Sub component used for the derived inbox and DLT. |
+| `dapr_http_port` | `DAPR_HTTP_PORT` | Local sidecar HTTP port used for router service invocation. |
+| `router_timeout_seconds` | `30.0` | Deadline for each router MCP exchange. |
+| `startup_timeout_seconds` | `30.0` | Deadline for workflow-worker readiness. |
+
+Application ID, exact logical agent name, state-store name, and workflow name come from the agent. Infrastructure identity, topics, and broker coordinates are never model arguments.
 
 Startup revalidates the supported profile on context entry, runs public MCP discovery, revalidates again, resolves configuration, loads the catalog, collision-checks all generated tools, performs one final pre-mutation validation, initializes and reconciles durable intent, attaches tools, performs normal hosting, verifies `WorkflowRuntime.wait_for_worker_ready()`, and finally opens the derived inbox/DLT. An empty catalog still exposes `list_drasi_subscriptions()`. No special startup model turn is performed.
 
@@ -110,14 +146,25 @@ Generated tools are added to the existing executor without replacing author tool
 
 The initial dynamic profile requires a fresh agent constructed without `runtime=`. Do not share or replace that runtime. Runtime ownership is a documented caller precondition because the current public framework API cannot inspect it. Dynamic mode also rejects `RuntimeSubscriptionConfig` and pre-existing activation callbacks. These are initial integration restrictions, not framework-wide rules. External `executor=` runtimes and orchestrators are also unsupported.
 
-Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. If cleanup reports an unresolved owned resource, call `await lifecycle.aclose()` to retry only that cleanup; this never rehosts the agent. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
+Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
+
+If context exit reports unresolved cleanup, retain the lifecycle object from the example above. After addressing the reported dependency or shutdown problem, retry cleanup as a separate operation:
+
+```python
+# Run later from the application's shutdown supervisor.
+await lifecycle.aclose()
+```
+
+`aclose()` never rehosts the agent or removes durable intent and router rules.
 
 The lifecycle creates and yields its runner. `workflow_client=` may inject a caller-owned workflow client; the runner does not close injected clients. The dynamic inbox owns a dedicated Dapr client created through `agent.client_factory`. Shutdown marks intake intentional, closes dynamic and runner Pub/Sub transports to unblock their streams, joins consumers, drains workflow execution, lets the runner perform its normal cleanup, then closes router resources. If an inbox thread may still be active or runtime shutdown is unresolved, dependent clients, router resources, and the application guard remain owned for a later `aclose()` attempt. It never unsubscribes or deletes durable intent. If application code raises or is cancelled, cleanup diagnostics are attached without replacing the original exception or cancellation.
 
 The intent component must support ETags and honor strong reads. State/router errors fail preparation instead of producing an empty subscription set. Tool-name collisions and missing state, bus, or router configuration are actionable errors, not partially usable capabilities.
 
 ### Examples
-- [Drasi Change-Driven Agents on Kubernetes](../../examples/ext-drasi-change-driven-agents-k8s/README.md) — demonstrates how to subscribe an agent to Drasi queries in a Kubernetes environment.
+
+- [Author-configured Drasi triggers on Kubernetes](../../examples/ext-drasi-change-driven-agents-k8s/README.md) demonstrates fixed query subscriptions and author-provided task mapping.
+- [Agent-managed Drasi subscriptions on Kubernetes](../../examples/ext-drasi-agent-managed-subscriptions-k8s/README.md) demonstrates runtime query selection, durable intent, independent event workflows, follow-up monitoring, inspection, and unsubscribe.
 
 ## Development
 
@@ -145,9 +192,9 @@ uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integra
 
 See the `Code Quality` section in the [development README](../../docs/development/README.md) for code quality commands.
 
-### Agent-managed internal contracts
+### Agent-managed architecture
 
-`_models.py` and `_interfaces.py` define the private component contracts. The public `drasi_subscription_lifecycle()` context composes their completed implementations. Changes to these shared contracts and fixtures belong in one coordinated foundation follow-up, rather than conflicting edits in individual lanes.
+`_models.py` and `_interfaces.py` define the private component contracts. The public `drasi_subscription_lifecycle()` context composes the router client, intent repository, subscription manager, generated tools, admission handler, and delivery adapter.
 
 #### Configuration and ownership
 
@@ -155,9 +202,9 @@ See the `Code Quality` section in the [development README](../../docs/developmen
 
 `ResolvedDrasiConfig` contains that scope, `pubsub_name`, `state_store_name`, the already-registered `workflow_name`, and `dapr_http_port`. All values are resolved before construction; this model does not read environment variables, discover resources, or create clients. Its `router_mcp_url` addresses the configured router through the local Dapr sidecar.
 
-All domain methods are synchronous and return completed results, not tasks, futures, or enqueue acknowledgements. Blocking state/network I/O belongs in preparation, a subscription worker, or an ordinary tool activity. Async callers must offload blocking calls rather than block their application event loop. Deterministic workflow bodies and replayed hooks must not perform this I/O. R1 owns adaptation to asynchronous MCP machinery, including session/task/loop affinity; this foundation supplies no threading framework and does not assume a session can move between arbitrary event loops.
+All domain methods are synchronous and return completed results, not tasks, futures, or enqueue acknowledgements. Blocking state/network I/O belongs in preparation, a subscription worker, or an ordinary tool activity. Async callers must offload blocking calls rather than block their application event loop. Deterministic workflow bodies and replayed hooks must not perform this I/O. `MCPRouterClient` adapts the asynchronous MCP machinery while keeping each session, task, and event loop within one bounded exchange.
 
-I1 owns preparation and resource lifetime: discover MCP tools, prepare the router catalog, initialize/load intent, reconcile the manager, attach tools, verify worker readiness, and only then admit inbox work. It closes partially prepared resources on failure. The inbox owns a dedicated Dapr client; tools and the manager borrow their router and state dependencies. The agent continues to own its configured state-store primitive. `RouterClient.close()` is idempotent and releases runtime resources only. Shutdown never removes intent or router rules.
+The public lifecycle owns preparation and resource lifetime: discover MCP tools, prepare the router catalog, initialize or load intent, reconcile the manager, attach tools, verify worker readiness, and only then admit inbox work. It closes partially prepared resources on failure. The inbox owns a dedicated Dapr client; tools and the manager borrow their router and state dependencies. The agent continues to own its configured state-store primitive. `RouterClient.close()` is idempotent and releases runtime resources only. Shutdown never removes intent or router rules.
 
 #### Component signatures
 
@@ -168,7 +215,7 @@ The complete signatures are in `_interfaces.py`. `Operation` below is imported f
 | `RouterClient.list_queries()` | Returns shared `ListQueriesResponse` | Prepare/cache the complete startup catalog for `scope`; an empty catalog is valid, a failed fetch is not an empty catalog. |
 | `RouterClient.subscribe(request)` | Shared `SubscribeRequest` -> `SubscribeResponse` | A validated confirmation of the query, subscriber scope, incarnation, effective operation set, and derived topic. Both `created` and `updated` succeed. |
 | `RouterClient.unsubscribe(request)` | Shared `UnsubscribeRequest` -> `UnsubscribeResponse` | A validated confirmation for the request; both `removed=True` and `removed=False` confirm absence. Retired queries remain removable. |
-| `RouterClient.close()` | Returns `None` | I1 owns cleanup, including after failed preparation. Calls after close are invalid lifecycle usage, not successful no-ops. |
+| `RouterClient.close()` | Returns `None` | The lifecycle owns cleanup, including after failed preparation. Calls after close are invalid lifecycle usage, not successful no-ops. |
 | `IntentReader.get(query_id: str)` | Returns `SubscriptionIntent` or `None` | An owned local snapshot; `None` means genuinely absent intent. Reading may perform persistent I/O. |
 | `IntentRepository.load()` | Returns `IntentSnapshot` or `None` | The whole scoped document and its ETag, including queries absent from the current catalog. `None` means the document is absent. |
 | `IntentRepository.initialize(document)` | `IntentDocument` -> `None` | Unconditional initialization only during single-owner preparation, after checking absence and before admitting work. Not atomic create-if-absent. |
@@ -193,13 +240,13 @@ The client honors the Dapr SDK's `DAPR_API_TOKEN` setting through the `dapr-api-
 
 `IntentDocument` has required `format_version=1`, a `SubscriptionScope`, and an `intents` mapping keyed by query ID. Each `SubscriptionIntent` contains its query ID, selected operations, handling instructions, historical full catalog snapshot, opaque non-empty incarnation, status, and optional `RouterOperationOutcome`. Record keys and catalog/router identities must agree. The format version is local persistence metadata, not a new router wire field.
 
-`IntentSnapshot.etag` belongs to the **entire router/subscriber document**, never an individual query. A successful write to query A invalidates the token held by a simultaneous writer for query B. On conflict, S2 must reread the document, reevaluate its targeted transition, and merge only that query's intended change into the fresh document before conditionally saving again. It must not resubmit an unchanged stale document or overwrite unrelated queries. S1 must surface the conflict rather than silently perform that overwrite.
+`IntentSnapshot.etag` belongs to the **entire router/subscriber document**, never an individual query. A successful write to query A invalidates the token held by a simultaneous writer for query B. On conflict, the subscription manager must reread the document, reevaluate its targeted transition, and merge only that query's intended change into the fresh document before conditionally saving again. It must not resubmit an unchanged stale document or overwrite unrelated queries. The repository surfaces the conflict rather than silently performing that overwrite.
 
 Initial creation is serialized by single-owner preparation. `initialize` is explicitly an unconditional write, not an `If-None-Match` operation and not a way around a failed CAS. Preparation reloads the created document to obtain an ETag before admitting work. Every subsequent update, including removal of a completed subscription, uses the whole-document ETag. An empty document can remain after the last unsubscribe. This design needs no state-store query API, per-query index, transaction framework, or distributed lease.
 
-Statuses are `pending_subscribe`, `pending_update`, `active`, `pending_unsubscribe`, and `unavailable`. S2 persists pending intent before calling the router and reports success only after its final local commit. Updates and retries retain incarnation; unsubscribe followed by a new subscription changes it. A failed or uncertain mutation retains pending intent. A failed local write can also have committed, so recovery must reload rather than assume the previous state.
+Statuses are `pending_subscribe`, `pending_update`, `active`, `pending_unsubscribe`, and `unavailable`. The subscription manager persists pending intent before calling the router and reports success only after its final local commit. Updates and retries retain incarnation; unsubscribe followed by a new subscription changes it. A failed or uncertain mutation retains pending intent. A failed local write can also have committed, so recovery must reload rather than assume the previous state.
 
-Startup reasserts active/pending subscriptions, completes pending unsubscriptions even when a query has left the catalog, and otherwise marks removed queries unavailable while retaining their historical metadata. Query reappearance does not automatically revive unavailable intent. Ordinary shutdown does not unsubscribe. The models validate data shapes; S2, not these models or the fakes, implements transition ordering and same-query serialization.
+Startup reasserts active or pending subscriptions, completes pending unsubscriptions even when a query has left the catalog, and otherwise marks removed queries unavailable while retaining their historical metadata. Query reappearance does not automatically revive unavailable intent. Ordinary shutdown does not unsubscribe. The subscription manager implements transition ordering and same-query serialization.
 
 #### Durable intent storage
 
@@ -209,7 +256,7 @@ The storage key is `<service key prefix>drasi:intent:<scope.inbox_topic>`. The s
 
 Initialization is unconditional and restricted by the caller to exclusive preparation. Subsequent saves pass the expected document ETag with first-write-wins and strong write consistency. A gRPC `ABORTED` conditional save is a conflict; other transport failures are unavailable, and may follow a committed write. Each write uses a fresh client from the configured primitive's factory and explicitly disables SDK retries on that client. Otherwise, a committed write with a lost reply could be retried with its stale ETag and incorrectly reported as a conflict. The configured factory, read retry policy, and runtime-side resiliency policies are unchanged. The adapter does not retry or repair writes: callers reload after success or uncertain failure and merge against fresh state after conflicts. It adds no TTL, automatic deletion, router calls, or catalog filtering.
 
-Malformed JSON, invalid records, mismatched scope, and missing or incorrectly typed versions fail as corrupt; an unsupported integer format version fails separately. Error messages and logs contain safe categories rather than backend responses or stored instructions. S1 coverage is in `tests/test_intent_store.py` and exercises the real state wrappers with an injected SDK boundary.
+Malformed JSON, invalid records, mismatched scope, and missing or incorrectly typed versions fail as corrupt; an unsupported integer format version fails separately. Error messages and logs contain safe categories rather than backend responses or stored instructions. Repository coverage in `tests/test_intent_store.py` exercises the real state wrappers with an injected SDK boundary.
 
 #### Subscription commands and recovery
 
@@ -221,7 +268,7 @@ An unavailable intent is never revived by catalog reappearance or a subscribe ca
 
 A fresh incarnation rejects already-published inbox messages carrying the old incarnation. It does not fence query generations: an upstream packed event retried later can be routed through the new rule and stamped with the new incarnation. Continue using fresh query IDs for deleted/recreated queries or changed query semantics. Explicit unsubscribe/re-subscribe is subscription-lifecycle hygiene, not query-generation fencing.
 
-The single-owner POC manager serializes mutating commands within its process; listing reads persisted snapshots without waiting for a router call. Whole-document ETag conflicts reload and merge only the targeted query, with at most ten write attempts. A changed same-query intent is never overwritten. The manager adds no router discovery, periodic refresh, startup model turn, resource cleanup, or shutdown unsubscribe; I1 owns composition and resource lifetimes. Its synchronous methods perform I/O and belong in preparation or ordinary tool activities, never deterministic workflow bodies or replayed hooks.
+The single-owner POC manager serializes mutating commands within its process; listing reads persisted snapshots without waiting for a router call. Whole-document ETag conflicts reload and merge only the targeted query, with at most ten write attempts. A changed same-query intent is never overwritten. The manager adds no router discovery, periodic refresh, startup model turn, resource cleanup, or shutdown unsubscribe; the public lifecycle owns composition and resource lifetimes. Its synchronous methods perform I/O and belong in preparation or ordinary tool activities, never deterministic workflow bodies or replayed hooks.
 
 #### Snapshot and admission boundaries
 
@@ -229,7 +276,7 @@ Return values are detached caller-owned snapshots. Components deep-copy models t
 
 `SubscriptionIntent` parses an owned catalog through the shared package and serializes it with `to_wire`, preserving omitted optional fields such as `usage`. Do not replace that serialization with an ordinary nested `model_dump()` that introduces unsupported explicit nulls. Persist documents using their model serialization and validate on load; do not bypass shared wire validation.
 
-| Condition after protocol parsing | D1 result |
+| Condition after protocol parsing | Admission result |
 |---|---|
 | No intent, unavailable intent, pending unsubscribe, or stale incarnation | `Discard` |
 | Matching pending subscribe/update | `Retry`, before evaluating the requested operation filter |
@@ -238,11 +285,11 @@ Return values are detached caller-owned snapshots. Components deep-copy models t
 | Malformed/unsupported delivery or row, or wrong router | `Poison` |
 | Valid active matching intent | `SchedulingInput(instance_id, event_id, task)` |
 
-`SchedulingInput.task` is complete, owned text containing the admitted instructions, catalog context, operation, event identity and canonical event data. D1 delimits projected data as untrusted and derives a bounded deterministic instance ID from the router/subscriber scope, incarnation and canonical row event ID. Later intent changes cannot rewrite that text. No current time, model-generated token, or outer publication ID changes the agreed row identity.
+`SchedulingInput.task` is complete, owned text containing the admitted instructions, catalog context, operation, event identity and canonical event data. The task builder delimits projected data as untrusted and derives a bounded deterministic instance ID from the router/subscriber scope, incarnation and canonical row event ID. Later intent changes cannot rewrite that text. No current time, model-generated token, or outer publication ID changes the agreed row identity.
 
 The private `DrasiAdmissionHandler(scope=..., intents=...)` in `admission.py` implements this boundary using an `IntentReader` with the same scope. It accepts decoded M2 CloudEvent data only, validates finite JSON values before shared protocol parsing, verifies that the event can be encoded as task JSON before reading intent, and resolves lifecycle status before operation filtering. Delivery encoding failures are poison input, not corrupt-state retries; interpreter conversion limits remain unchanged. `task_builder.build_event_task()` freezes the admitted context and event into separately delimited JSON text. Its 70-character workflow ID is `drasi-` followed by the SHA-256 hex digest of the compact ASCII JSON tuple `("drasi-agent-workflow/v1", scope.inbox_topic, incarnation, event_id)`. This is correlation, not a permanent deduplication guarantee.
 
-D2 maps these results to transport responses and schedules the configured workflow. A `SchedulingInput` is **not** an acknowledgement: success follows scheduling acceptance or an explicit existing-active-instance conflict, not local enqueue or workflow completion. Arbitrary scheduler errors retry. Duplicate workflows after terminal ID reuse remain possible.
+The delivery adapter maps these results to transport responses and schedules the configured workflow. A `SchedulingInput` is **not** an acknowledgement: success follows scheduling acceptance or an explicit existing-active-instance conflict, not local enqueue or workflow completion. Arbitrary scheduler errors retry. Duplicate workflows after terminal ID reuse remain possible.
 
 The private `delivery.subscribe_drasi_inbox(config=..., admission=..., dapr_client=..., workflow_client=...)` opens the derived inbox and DLT on the configured application Pub/Sub component and returns an owned inbox handle. It decodes the SDK message's raw CloudEvent **data** without using the outer publication ID as workflow identity. A single consumer waits for `schedule_new_workflow()` acceptance before responding; it never waits for workflow completion or deduplicates against a local cache. Only the scheduler's structured gRPC `ALREADY_EXISTS` conflict is acknowledged as an existing active instance. Other errors or mismatched scheduling confirmations request retry.
 
@@ -252,20 +299,20 @@ The pinned SDK buffers acknowledgement responses and logs rather than propagates
 
 The inbox handle marks shutdown intentional, closes its owned Dapr client to interrupt the streaming iterator, closes the SDK's current subscription, and joins its consumer. Final consumer cleanup closes the current stream again, including any replacement opened by an in-flight reconnect. It records transport, subscription, and consumer completion separately; a later `close()` retries only unresolved resources. Stream/consumer failures are logged immediately. A consumer still running after the ten-second shutdown deadline raises `DrasiDeliveryError` and remains the lifecycle's responsibility. Long-running SDK calls must be bounded by deployment timeout/resiliency settings; shutdown does not cancel accepted workflows.
 
-#### Shared fixtures and lane ownership
+#### Component map
 
-Extension-local `tests/conftest.py` and `tests/fakes.py` provide contract-backed catalogs/deliveries, pending-state examples, a scripted router, a scripted manager, and a document-level in-memory repository. Their purpose is to let T1, S2 and D1 exercise their own components without waiting for real dependencies. They are not a second subscription engine. Scripted outcomes must be explicit; storage errors are not empty results, stale ETags conflict, initialization is not create-only, and returned mutable values are detached.
+Extension-local `tests/conftest.py` and `tests/fakes.py` provide contract-backed catalogs and deliveries, pending-state examples, a scripted router, a scripted manager, and a document-level in-memory repository. They exercise component boundaries without becoming a second subscription engine. Scripted outcomes must be explicit; storage errors are not empty results, stale ETags conflict, initialization is not create-only, and returned mutable values are detached.
 
-| Owner | Production files and responsibilities |
+| Component | Production files and responsibilities |
 |---|---|
-| F2 / coordinated foundation follow-up | `_models.py`, `_interfaces.py`, shared fixtures/fakes and their contract coverage |
-| R1 | `router_client.py`: MCP lifecycle, parsing, reply validation, async adaptation |
-| S1 | `intent_store.py`: configured runtime-store adapter, document codec and conditional writes |
-| S2 | `subscription_manager.py`: commands, serialization of transitions and reconciliation |
-| T1 | `subscription_tools.py`: schemas/descriptions and delegation to the manager |
-| D1 | `admission.py`, `task_builder.py`: persistent read, classification and detached event task |
-| D2 | `delivery.py`: inbox/DLT lifecycle, transport dispositions and scheduling acceptance |
-| I1 | One-shot lifecycle composition, tool attachment, mode exclusion and public export |
+| Private contracts | `_models.py`, `_interfaces.py`, shared fixtures and contract coverage |
+| Router client | `router_client.py`: MCP lifecycle, parsing, reply validation and async adaptation |
+| Intent repository | `intent_store.py`: configured runtime-store adapter, document codec and conditional writes |
+| Subscription manager | `subscription_manager.py`: commands, transition serialization and reconciliation |
+| Generated tools | `subscription_tools.py`: schemas, descriptions and delegation to the manager |
+| Admission | `admission.py`, `task_builder.py`: persistent read, classification and detached event task |
+| Delivery | `delivery.py`: inbox/DLT lifecycle, transport dispositions and scheduling acceptance |
+| Public lifecycle | `subscriptions.py`: one-shot composition, tool attachment, mode exclusion and public export |
 
 Composition is extension-owned rather than an activation hook. Dynamic mode rejects runtime configuration subscriptions and pre-existing activation callbacks, prepares before the first normal hosting call, verifies worker readiness, and opens the inbox last. Generated tools remain attached because failed or stopped agent/runner objects are one-shot and are not reused. Delivery uses the extension-owned adapter rather than the generic filter/mapper path.
 
@@ -273,7 +320,7 @@ Composition is extension-owned rather than an activation hook. Dynamic mode reje
 
 The private `subscription_tools.build_subscription_tools(catalog, manager)` factory returns ordinary synchronous `AgentTool` objects without performing network/state I/O or changing an agent. Each cached query gets subscribe/unsubscribe tools with bounded, deterministic names containing a digest of the exact query ID. Subscribe accepts only explicit, distinct `i/u/d` operations and non-blank, self-contained handling instructions. `list_drasi_subscriptions()` is always present, including for an empty catalog, and reports local intent rather than live router state.
 
-The tools borrow the F2 management interface and preserve classified command failures as error results, including the unsubscribe-before-resubscribe guidance for retained unavailable intent. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. The public lifecycle owns attachment to the existing executor, collision checks, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
+The tools borrow the subscription manager interface and preserve classified command failures as error results, including the unsubscribe-before-resubscribe guidance for retained unavailable intent. Their diagnostics exclude handling instructions and raw payloads. This is an extension-tool logging boundary, not an end-to-end redaction guarantee: existing core console output, debug logging, and tracing may include tool arguments and results. The public lifecycle owns attachment to the existing executor, collision checks, and lifecycle preparation. The factory is not publicly re-exported and does not enable dynamic subscriptions by itself.
 
 ### Regenerate Drasi models
 
