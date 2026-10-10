@@ -148,7 +148,11 @@ The same environment is reused for both stages and removed on success or
 failure. The workflow logs the total verification time, including dependency
 installation. Dependency conflicts fail the check rather than being masked by
 development packages or version overrides. Full Git history and release tags
-are needed to reproduce the core wheel's actual `setuptools_scm` version.
+are needed to reproduce the core wheel's actual `setuptools_scm` version. On
+forks, the package job fetches upstream release tags before building; this
+avoids generating a version below Drasi's required core version when the fork
+has no tags of its own. These tags are only fetched into the job's checkout,
+not pushed to the fork.
 
 ### Integration Tests
 
