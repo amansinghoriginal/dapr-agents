@@ -129,6 +129,27 @@ uv run pytest tests/test_random_orchestrator.py
 uv run pytest --cov=dapr_agents
 ```
 
+### Built Wheel Verification
+
+The `package` job in [the build workflow](../../.github/workflows/build.yaml)
+checks consumer installations separately from the development environment.
+It builds the core and Drasi wheels, then uses the job's Python 3.11 interpreter
+to create a temporary virtual environment outside the checkout.
+
+The check first installs the local core wheel without extras and verifies its
+public imports while Drasi is absent. It then installs both local wheel paths
+explicitly and verifies the existing Drasi public imports. Each stage resolves
+dependencies from wheel metadata, runs `uv pip check`, compares installed
+versions with the built wheels, and checks that imports come from the temporary
+environment. Python runs in isolated mode, without checkout or `PYTHONPATH`
+fallback.
+
+The same environment is reused for both stages and removed on success or
+failure. The workflow logs the total verification time, including dependency
+installation. Dependency conflicts fail the check rather than being masked by
+development packages or version overrides. Full Git history and release tags
+are needed to reproduce the core wheel's actual `setuptools_scm` version.
+
 ### Integration Tests
 
 > Note: we do not use `pytest-docker-compose` intentionally here because it is not compatible with Python2,
