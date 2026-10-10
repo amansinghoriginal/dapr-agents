@@ -30,7 +30,6 @@ import httpx
 
 HERE = Path(__file__).resolve().parent
 ROUTER_REVISION = "7e3f4f2aec6574ba1f487d910315e4265670ddc8"
-CONTRACT_REVISION = "49e8df694a16520519a1ba559f99c1a13a668431"
 QUERY = "service-errors"
 OTHER_QUERY = "rollout-status"
 CONSUMER = "managed-agent"
@@ -187,7 +186,7 @@ class Runtime:
         report = {
             "project": self.project,
             "router_revision": ROUTER_REVISION,
-            "contract_revision": CONTRACT_REVISION,
+            "contract_version": self.info["versions"]["drasi-agent-router-contracts"],
             "source_revision": command(
                 ["git", "rev-parse", "HEAD"], environment=self.environment
             ),

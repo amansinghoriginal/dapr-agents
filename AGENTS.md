@@ -19,7 +19,7 @@ limitations under the License.
 
 ## Quick Commands
 
-Git is required for the Drasi extension's pinned source dependency.
+The Drasi extension pins its shared router contract to an exact PyPI prerelease.
 
 - **Setup**: `uv venv && source .venv/bin/activate && uv sync --active --group test --extra drasi --config-settings-package dapr-agents:editable_mode=strict --reinstall-package dapr-agents`
 - **Before commit (REQUIRED)**: `uv run --frozen --no-sync ruff format && uv run --frozen --no-sync flake8 dapr_agents tests ext --ignore=E501,F401,W503,E203,E704 && uv run --frozen --no-sync mypy --config-file mypy.ini && uv run --frozen --no-sync pytest tests -m "not integration" && uv run --frozen --no-sync pytest ext/dapr-agents-ext-drasi/tests -m "not integration"`

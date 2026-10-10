@@ -59,7 +59,7 @@ Compose is invoked with an empty environment file, and the agent build has an ex
 | Dapr runtime, placement, scheduler | `1.18.4` |
 | Redis Streams and Redis state stores | `7.4.2-alpine` |
 | Built-in router and Reaction SDK | Drasi Platform revision `7e3f4f2aec6574ba1f487d910315e4265670ddc8` |
-| Shared Python contract | Extension's pinned revision `49e8df694a16520519a1ba559f99c1a13a668431` |
+| Shared Python contract | PyPI `drasi-agent-router-contracts==0.1.0a1` |
 | Agent SDK and dependencies | Repository `uv.lock`, installed with `--frozen` |
 | Agent container Python / uv | `3.12.12` / `0.11.27` |
 
