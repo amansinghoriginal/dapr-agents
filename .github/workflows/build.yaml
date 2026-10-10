@@ -142,4 +142,4 @@ jobs:
         uv pip install --target .wheel-test --no-deps dist/core/*.whl dist/drasi/*.whl
         cd /tmp
         PYTHONPATH="$GITHUB_WORKSPACE/.wheel-test" "$GITHUB_WORKSPACE/.venv/bin/python" \
-          -c "from dapr_agents.ext.drasi import DrasiChangeEvent, DrasiOperation, drasi_trigger"
+          -c "from dapr_agents.ext.drasi import DrasiChangeEvent, DrasiOperation, register_drasi_trigger, drasi_subscription_lifecycle, DrasiSubscriptionLifecycle, DrasiLifecycleError"
