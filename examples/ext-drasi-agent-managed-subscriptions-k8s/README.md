@@ -53,7 +53,7 @@ Use macOS or Linux on arm64 or amd64 with Docker running, Docker Buildx, Git, Ma
 | Platform source and CLI | [`7e3f4f2aec6574ba1f487d910315e4265670ddc8`](https://github.com/drasi-project/drasi-platform/tree/7e3f4f2aec6574ba1f487d910315e4265670ddc8) |
 | Platform images | `m2-7e3f4f2aec65-azure-linux`, built from that checkout and its pinned Core submodule |
 | CLI builder | `golang:1.24.4-bookworm` |
-| Agent/router Python contract | The extension's immutable public Git dependency, resolved in this example's `uv.lock` |
+| Agent/router Python contract | PyPI `drasi-agent-router-contracts==0.1.0a1`, resolved in this example's `uv.lock` |
 
 `cluster.py` pins the Platform-provided MongoDB and internal Redis images by digest without replacing their configuration or provisioning another router state store. It builds only the Platform components this example uses, selecting the provided Azure Linux variant. The agent image gets a tag derived from its built image ID, not `latest`.
 

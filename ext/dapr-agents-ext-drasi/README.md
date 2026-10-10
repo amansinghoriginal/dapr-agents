@@ -32,7 +32,7 @@ This extension is installed as an optional dependency on the core `dapr-agents` 
 uv add dapr-agents[drasi]
 ```
 
-Installing this source version requires Git and access to the public Drasi Platform repository. The extension pins the [shared router contract package](https://github.com/drasi-project/drasi-platform/tree/49e8df694a16520519a1ba559f99c1a13a668431/typespec/dapr-agent-router/python) to an immutable revision; a local Platform checkout and schema-generation tools are not required. This dependency is not installed by the core framework unless the Drasi extension is selected.
+Agent-managed subscriptions use [`drasi-agent-router-contracts==0.1.0a1`](https://pypi.org/project/drasi-agent-router-contracts/0.1.0a1/), generated from the Drasi Platform TypeSpec source. A local Platform checkout and schema-generation tools are not required. This dependency is not installed by the core framework unless the Drasi extension is selected.
 
 ### Public API
 

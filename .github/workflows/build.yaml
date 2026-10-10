@@ -202,6 +202,10 @@ jobs:
             ).resolve()
             assert origin.parent == expected_directory, origin
 
+        contract_distribution = distribution("drasi-agent-router-contracts")
+        assert contract_distribution.version == "0.1.0a1"
+        assert contract_distribution.read_text("direct_url.json") is None
+
         required_exports = {
             "register_drasi_trigger",
             "drasi_subscription_lifecycle",
