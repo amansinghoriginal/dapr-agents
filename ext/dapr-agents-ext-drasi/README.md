@@ -92,6 +92,8 @@ Agent-managed mode requires:
 The lifecycle prepares Drasi, starts the workflow worker, opens event intake only after readiness, and yields an ordinary `AgentRunner`. Keep the lifecycle object if the application may need to retry unresolved cleanup:
 
 ```python
+from dapr_agents.workflow.utils.core import wait_for_shutdown
+
 lifecycle = drasi_subscription_lifecycle(
     agent,
     router_id="drasi-system/sre-router-reaction",
