@@ -146,22 +146,11 @@ The initial dynamic profile requires a fresh agent constructed without `runtime=
 
 Use one active dynamic lifecycle per Dapr application and one logical agent per application in the reference deployment. Static and dynamic modes cannot be mixed on one agent. Hosting is one-shot: after failure or shutdown, create fresh agent and runner objects. Durable intent and router rules survive ordinary shutdown and are reconciled by the fresh lifecycle.
 
-If context exit reports unresolved cleanup, retain the lifecycle object, address the reported dependency or shutdown problem, and retry only cleanup:
+If context exit reports unresolved cleanup, retain the lifecycle object from the example above. After addressing the reported dependency or shutdown problem, retry cleanup as a separate operation:
 
 ```python
-lifecycle = drasi_subscription_lifecycle(
-    agent,
-    router_id="drasi-system/sre-router-reaction",
-    namespace="applications",
-)
-
-try:
-    async with lifecycle as runner:
-        await wait_for_shutdown()
-except Exception:
-    # Retry after addressing the reported cleanup failure.
-    await lifecycle.aclose()
-    raise
+# Run later from the application's shutdown supervisor.
+await lifecycle.aclose()
 ```
 
 `aclose()` never rehosts the agent or removes durable intent and router rules.
