@@ -144,6 +144,18 @@ Keep core and extension test collection separate. Their `tests/conftest.py` modu
 
 Strict editable mode creates a core package link tree under `build/`. Keep that generated tree for as long as the virtual environment is in use. Repeat the full setup command after adding, moving, or removing core package modules so setuptools refreshes the link tree.
 
+### Built Wheel Verification
+
+The `package` job in [the build workflow](../../.github/workflows/build.yaml) checks that built distributions install and import without relying on the development environment.
+
+It first installs the local core wheel without optional extras and verifies its public imports. It then installs both explicit local core and Drasi extension wheels, including the extension's declared router-contract dependency.
+
+Both stages resolve dependencies from wheel metadata, run `uv pip check`, compare installed versions with the built wheels, and verify import locations. The Drasi stage also checks the static and agent-managed public exports and the shared contract imports. The checks use the job's Python 3.11 interpreter in a fresh environment outside the checkout, with Python isolated mode preventing `PYTHONPATH` and current-directory fallback.
+
+The environment is reused between stages and removed on success or failure. The workflow records total verification time, including dependency installation.
+
+Builds use the actual `setuptools_scm` version. Fork runs fetch upstream release tags into the job's checkout so version discovery has the necessary history; no tags are pushed to the fork and no package version is overridden.
+
 ### Integration Tests
 
 > Note: we do not use `pytest-docker-compose` intentionally here because it is not compatible with Python2,
