@@ -75,8 +75,8 @@ All public symbols are exported from `dapr_agents.ext.drasi`:
 from dapr_agents.ext.drasi import (
     register_drasi_trigger,  # Register author-configured Drasi query triggers
     drasi_subscription_lifecycle,  # Host agent-managed subscriptions
-    DrasiChangeEvent,              # Drasi change event model emitted by a query
-    DrasiOperation,                # Drasi operation enum: i, u, or d
+    DrasiChangeEvent,  # Drasi change event model emitted by a query
+    DrasiOperation,  # Drasi operation enum: i, u, or d
 )
 ```
 
@@ -99,6 +99,7 @@ Notes:
 - `register_drasi_trigger` is activation-time wiring only. It does not start the agent runtime by itself; it registers pub/sub routes on the target `DurableAgent`.
 - Multiple static query registrations on the same agent are supported. Static registration and the dynamic lifecycle share `_registration` mode checks so they cannot be mixed in either order.
 - The router contract dependency belongs to this extension and is pinned to an exact PyPI prerelease. Do not copy its generated models or replace the existing unpacked static event models with router delivery models.
+- Definitive router rejections retain unavailable intent and its last outcome without blocking other queries. Uncertain outcomes remain pending and still fail reconciliation; never bypass incarnation checks during cleanup.
 - `drasi_subscription_lifecycle()` hosts only once. Use fresh agent and runner objects after failure or shutdown; `aclose()` may retry unresolved cleanup but never rehosts.
 - Dynamic mode requires a fresh agent constructed without `runtime=` and currently rejects `RuntimeSubscriptionConfig` and pre-existing activation callbacks.
 - The dynamic inbox owns a dedicated Dapr client created from `agent.client_factory`; it borrows the runner's workflow client.

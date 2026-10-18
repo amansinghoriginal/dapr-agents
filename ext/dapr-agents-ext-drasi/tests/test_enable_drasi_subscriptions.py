@@ -30,6 +30,7 @@ from drasi_agent_router_contracts import (
     AgentDelivery,
     ListQueriesResponse,
     parse,
+    row_event_id,
     to_wire,
 )
 from fastapi import FastAPI
@@ -48,10 +49,12 @@ from dapr_agents.ext.drasi import (
     register_drasi_trigger,
 )
 from dapr_agents.ext.drasi import router_client, subscription_manager, subscriptions
+from dapr_agents.ext.drasi._interfaces import RouterError
 from dapr_agents.ext.drasi._models import (
     IntentDocument,
     SubscriptionIntent,
     SubscriptionScope,
+    SubscriptionStatus,
 )
 from dapr_agents.ext.drasi._registration import (
     DrasiApplicationConflictError,
@@ -65,7 +68,7 @@ from dapr_agents.workflow.runners.agent import AgentRunner
 
 from .test_delivery import _Stream, _message
 from .test_intent_store import _Backend, _state_config
-from .test_router_client import _Server, _subscribe_response, _success
+from .test_router_client import _Server, _error, _subscribe_response, _success
 
 
 @dataclass
@@ -377,6 +380,105 @@ async def test_tools_intent_admission_and_delivery_work_together(
         assert instructions in call.kwargs["input"]["task"]
         assert "BEGIN_UNTRUSTED_DRASI_EVENT_JSON" in call.kwargs["input"]["task"]
         assert _tool(harness.agent, "record_assessment").run() == "recorded"
+
+
+@pytest.mark.parametrize(
+    "status", ("active", "pending_subscribe", "pending_update", "pending_unsubscribe")
+)
+@pytest.mark.asyncio
+async def test_lifecycle_isolates_rejected_intent_and_delivers_other_queries(
+    harness: _Harness,
+    intent_document: IntentDocument,
+    insert_delivery: AgentDelivery,
+    status: SubscriptionStatus,
+) -> None:
+    rejected = intent_document.intents["service-errors"]
+    rejected.status = status
+    healthy = intent_document.intents["rollout-status"]
+    harness.repository().initialize(intent_document)
+    operation = "unsubscribe" if status == "pending_unsubscribe" else "subscribe"
+    harness.server.queue(operation, _error("incarnation_conflict"))
+    harness.server.queue(
+        "subscribe",
+        _success(
+            _subscribe_response(
+                harness.scope,
+                query_id=healthy.query_id,
+                subscription_incarnation=healthy.incarnation,
+                operations=[op.value for op in healthy.operations],
+            )
+        ),
+    )
+
+    def starting_worker() -> None:
+        unavailable = harness.repository().get(rejected.query_id)
+        active = harness.repository().get(healthy.query_id)
+        assert unavailable is not None and unavailable.status == "unavailable"
+        assert active is not None and active.status == "active"
+        assert harness.streams == []
+
+    harness.runtime.start.side_effect = starting_worker
+    async with harness.lifecycle():
+        result = _tool(harness.agent, "list_drasi_subscriptions").run()
+        assert not result.isError
+        assert result.structuredContent is not None
+        listed = {
+            item["query_id"]: item
+            for item in result.structuredContent["result"]["subscriptions"]
+        }
+        assert listed[rejected.query_id]["last_outcome"] == {
+            "operation": operation,
+            "outcome": "rejected",
+            "error_category": "incarnation_conflict",
+        }
+        assert listed[healthy.query_id]["status"] == "active"
+
+        document = to_wire(insert_delivery)
+        document["subscriptionIncarnation"] = rejected.incarnation
+        stream = harness.streams[0]
+        stream.messages.put(_message(parse(AgentDelivery, document)))
+        _, response = stream.responses.get(timeout=3)
+        assert response == TopicEventResponseStatus.success
+        harness.workflow.schedule_new_workflow.assert_not_called()
+
+        document["subscriptionIncarnation"] = healthy.incarnation
+        document["event"]["payload"]["source"]["queryId"] = healthy.query_id
+        document["event"]["payload"]["after"] = {"rolloutId": "rollout-1"}
+        document["eventId"] = row_event_id(
+            healthy.query_id, insert_delivery.event.seq, insert_delivery.event.op, 0
+        )
+        stream.messages.put(_message(parse(AgentDelivery, document)))
+        _, response = stream.responses.get(timeout=3)
+        assert response == TopicEventResponseStatus.success
+        harness.workflow.schedule_new_workflow.assert_called_once()
+        task = harness.workflow.schedule_new_workflow.call_args.kwargs["input"]["task"]
+        assert healthy.instructions in task
+        assert healthy.query_id in task
+
+    retained = harness.repository().get(rejected.query_id)
+    assert retained is not None and retained.status == "unavailable"
+    assert retained.incarnation == rejected.incarnation
+
+
+@pytest.mark.asyncio
+async def test_uncertain_reconciliation_still_prevents_hosting(
+    harness: _Harness,
+    intent_document: IntentDocument,
+) -> None:
+    harness.repository().initialize(intent_document)
+    harness.server.queue("subscribe", _error("state_unavailable"))
+
+    with pytest.raises(RouterError) as failure:
+        async with harness.lifecycle():
+            pytest.fail("Uncertain reconciliation unexpectedly admitted work.")
+
+    assert failure.value.category == "state_unavailable"
+    pending = harness.repository().get("service-errors")
+    assert pending is not None and pending.status == "pending_update"
+    assert pending.last_outcome is not None
+    assert pending.last_outcome.outcome == "uncertain"
+    harness.runtime.start.assert_not_called()
+    assert harness.streams == []
 
 
 @pytest.mark.asyncio

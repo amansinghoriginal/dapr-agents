@@ -97,7 +97,7 @@ def _text_document(result: types.CallToolResult) -> Any:
 class MCPRouterClient(RouterClient):
     """Blocking router operations, with async resources confined to a worker.
 
-    I1 calls ``list_queries`` during preparation and owns ``close``. Mutations
+    The owner calls ``list_queries`` during preparation and owns ``close``. Mutations
     also establish the catalog identity if needed, before sending any write.
     Each exchange initializes and closes its own stateless MCP session in one
     task; no HTTP client, task group, or event loop crosses calls.
@@ -230,7 +230,9 @@ class MCPRouterClient(RouterClient):
                 error_result = parse(ToolError, _text_document(result))
             except _WIRE_ERRORS:
                 self._fail("invalid_response", operation)
-            self._fail(_ERROR_CATEGORIES[error_result.code], operation)
+            self._fail(
+                _ERROR_CATEGORIES.get(error_result.code, "invalid_response"), operation
+            )
 
         if result.structuredContent is not None:
             return result.structuredContent
