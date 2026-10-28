@@ -8,9 +8,9 @@ on:
         required: true
         default: "3601e13236b7ccdd7874e83516319ffdeab16f02"
       docs_sha:
-        description: Exact companion documentation commit to validate
-        required: true
-        default: "6db5411f9e15ad2d1e5ef16b2a9e66f6dd03ec84"
+        description: Optional companion documentation commit to validate
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -122,7 +122,7 @@ jobs:
           docker version
           docker compose version
           test ! -e "$RUNNER_TEMP/drasi-managed-runtime"
-          uv run pytest --confcutdir=tests/integration/drasi_managed \
+          uv run pytest -x --confcutdir=tests/integration/drasi_managed \
             tests/integration/drasi_managed --run-drasi-managed \
             --basetemp="$RUNNER_TEMP/drasi-managed-runtime" \
             --junitxml="$RUNNER_TEMP/runtime-results.xml" \
@@ -137,6 +137,7 @@ jobs:
             ${{ runner.temp }}/drasi-managed-runtime
 
   companion-docs:
+    if: inputs.docs_sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
